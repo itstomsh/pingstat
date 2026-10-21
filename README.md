@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/itstomsh/pingstat/main/install -o i
 bash install.sh && rm install.sh   # or: sudo bash install.sh, for all users
 
 pingstat add kernel.org
-crontab -e                         # add: */5 * * * * pingstat -p
+crontab -e                         # add: * * * * * pingstat -p
 pingstat -d                        # a few days later
 ```
 
@@ -100,13 +100,13 @@ $ pingstat -o -s 192.168.1.1
 
 started              back_up              duration  failed_runs
 -------------------  -------------------  --------  -----------
-2025-03-07 21:10:01  2025-03-07 21:35:01  0h 25m    5
+2025-03-07 21:10:01  2025-03-07 21:35:01  0h 25m    25
 --------------------------------------------------------------
 
 Note: An outage started at or before 'started' and ended by 'back_up'.
 ```
 
-With runs every 5 minutes, the real start and end are up to 5 minutes earlier. An outage that has not
+With a run every minute, the real start and end are up to a minute earlier. An outage that has not
 ended yet shows `ongoing`.
 
 ### Stats columns
@@ -128,13 +128,17 @@ outages show up in `avg_loss`. Latency columns show `-` when no run in the perio
 
 ## Running from cron
 
-Ping all servers every 5 minutes (`crontab -e`):
+Ping all servers every minute (`crontab -e`):
 
 ```cron
-*/5 * * * * pingstat -p
+* * * * * pingstat -p
 ```
 
-Or give a server its own schedule:
+Every minute is the recommended interval and the shortest cron allows. It catches outages of a minute
+or two and dates them to the minute, while a run takes only about 3 seconds (4 pings, all servers in
+parallel). Each server's database grows by about 1440 rows a day, roughly 30 MB a year.
+
+A server can also have its own, less frequent schedule:
 
 ```cron
 */5 * * * * pingstat -p -s kernel.org
