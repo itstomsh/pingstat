@@ -5,7 +5,8 @@
 Long-term ping statistics from the command line, like `vnstat` for latency.
 
 `pingstat` pings your servers from `cron`, stores the results in one SQLite database per server and
-shows daily, monthly and hour-of-day summaries of latency, jitter and packet loss. It is a single
+shows daily, monthly and hour-of-day summaries of latency, jitter and packet loss, and a list of
+outages. It is a single
 Bash script: no daemon, no web UI, no root.
 
 ```
@@ -57,7 +58,7 @@ rm install.sh
 
 With `wget`, download it with `wget -q https://raw.githubusercontent.com/itstomsh/pingstat/main/install -O install.sh`.
 
-To install a specific version, pass it to the script: `bash install.sh 1.3.0`. Versions are listed in
+To install a specific version, pass it to the script: `bash install.sh 1.4.0`. Versions are listed in
 the [CHANGELOG](CHANGELOG.md).
 
 > **Installed 1.1.0 or older?** Those versions look for updates on Codeberg, where pingstat is no
@@ -74,14 +75,39 @@ the [CHANGELOG](CHANGELOG.md).
 | `pingstat -d [N]` | Daily stats for the last `N` days (default 20) |
 | `pingstat -m [N]` | Monthly stats for the last `N` months (default 12) |
 | `pingstat -H [N]` | Stats per hour of day over the last `N` days (default 7) |
-| `-s <server>` | Limit `-p`, `-d`, `-m` or `-H` to one server |
+| `pingstat -o [N]` | Outages in the last `N` days (default 30) |
+| `-s <server>` | Limit `-p`, `-d`, `-m`, `-H` or `-o` to one server |
 | `--version`, `--update`, `--force-update` | Show the version, update to the latest one, reinstall it |
-| `--uninstall` | Remove pingstat **and all its data** for your user |
+| `--uninstall` | Remove pingstat **and all its data** for your user (asks first) |
 
 ```bash
 pingstat -d 5 -s gnu.org   # last 5 days for gnu.org only
 pingstat -H 30             # which hours of the day were worst in the last 30 days
+pingstat -o                # when the connection was down in the last 30 days
 ```
+
+Server names must be host names or IP addresses (letters, digits, `.`, `-`, `:`; not starting with
+`-` or `.`).
+
+### Outages
+
+An outage is a series of consecutive runs in which no ping got a reply. `-o` shows when it was first
+noticed, the first run that got a reply again and the time in between:
+
+```
+$ pingstat -o -s 192.168.1.1
+----- Outages for '192.168.1.1' (last 30 days) -----
+
+started              back_up              duration  failed_runs
+-------------------  -------------------  --------  -----------
+2025-03-07 21:10:01  2025-03-07 21:35:01  0h 25m    5
+--------------------------------------------------------------
+
+Note: An outage started at or before 'started' and ended by 'back_up'.
+```
+
+With runs every 5 minutes, the real start and end are up to 5 minutes earlier. An outage that has not
+ended yet shows `ongoing`.
 
 ### Stats columns
 
@@ -121,7 +147,7 @@ If a run is still pinging a server when the next one starts, the next run skips 
 
 | Path | Contents |
 | --- | --- |
-| `~/.config/pingstat/servers.conf` | Server list (`SERVERS="kernel.org gnu.org"`) |
+| `~/.config/pingstat/servers.list` | Server list, one per line (`#` starts a comment); edit it by hand or with `add`/`remove` |
 | `~/.local/share/pingstat/<server>.db` | Results for one server (SQLite, table `ping_data`, timestamps in UTC) |
 
 Both honour `XDG_CONFIG_HOME` and `XDG_DATA_HOME`.
@@ -130,7 +156,7 @@ Both honour `XDG_CONFIG_HOME` and `XDG_DATA_HOME`.
 
 ```bash
 pingstat --update      # uses sudo itself if pingstat is installed in /usr/bin
-pingstat --uninstall   # removes the script, your config and all your data
+pingstat --uninstall   # asks, then removes the script, your config and all your data
 ```
 
 To remove it by hand:
@@ -144,9 +170,11 @@ Remove the `pingstat` line from your crontab as well.
 
 ## Troubleshooting
 
-**`pingstat` exits without output.** `servers.conf` is read as Bash, so a syntax error in it stops the
-script. Check that it is a single line like `SERVERS="kernel.org gnu.org"`, or delete it and add the
-servers again; their data is kept.
+**A server is missing from `list`.** `pingstat` warns about and skips lines in `servers.list` that are
+not a valid host name or IP address. Fix the line; the server's data is kept.
+
+**Upgrading from 1.3.0 or older.** The first run converts `servers.conf` to `servers.list` without
+executing it and keeps the old file as `servers.conf.bak`.
 
 **All latency columns show `-`.** Either the server never answered (see `avg_loss`), or your `ping`
 prints a format pingstat does not recognise. Run `ping -c 4 <server>` and

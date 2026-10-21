@@ -14,7 +14,7 @@ setup() {
 }
 
 servers() {
-    echo "SERVERS=\"$*\"" > "$XDG_CONFIG_HOME/pingstat/servers.conf"
+    printf '%s\n' "$@" > "$XDG_CONFIG_HOME/pingstat/servers.list"
 }
 
 query() {
@@ -49,6 +49,62 @@ insert() {
     run "$PINGSTAT" -d -s
     [ "$status" -eq 1 ]
     [[ "$output" == "Usage: -s <server>" ]]
+}
+
+@test "add rejects names that are not host names or IP addresses" {
+    for name in -c1 ../evil a/b ".hidden" "a b"; do
+        run "$PINGSTAT" add "$name"
+        [ "$status" -eq 1 ]
+        [[ "$output" == "Invalid server name '$name'."* ]]
+    done
+    run "$PINGSTAT" add 2001:db8::1
+    [ "$status" -eq 0 ]
+}
+
+@test "servers.list ignores comments, blank lines and invalid names" {
+    printf '%s\n' "# my servers" "" "  ok.test   # router" "-bad" "two.test" > "$XDG_CONFIG_HOME/pingstat/servers.list"
+    run "$PINGSTAT" list
+    [[ "$output" == *"Ignoring invalid server name '-bad'"* ]]
+    [[ "$output" == *"ok.test => "* ]]
+    [[ "$output" == *"two.test => "* ]]
+}
+
+@test "servers.conf from before 1.4.0 is migrated without being executed" {
+    local conf="$XDG_CONFIG_HOME/pingstat/servers.conf"
+    echo 'SERVERS="ok.test two.test"' > "$conf"
+    echo "touch '$BATS_TEST_TMPDIR/executed'" >> "$conf"
+    run "$PINGSTAT" list
+    [ "$status" -eq 0 ]
+    [[ "${lines[0]}" == "Migrated "* ]]
+    [[ "$output" == *"ok.test => "* ]]
+    [[ "$output" == *"two.test => "* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/executed" ]
+    [ ! -e "$conf" ]
+    [ -e "$conf.bak" ]
+    [ "$(grep -v '^#' "$XDG_CONFIG_HOME/pingstat/servers.list")" = "$(printf 'ok.test\ntwo.test')" ]
+
+    # Only once
+    run "$PINGSTAT" list
+    [[ "$output" != *"Migrated"* ]]
+}
+
+@test "--uninstall asks first and keeps everything unless confirmed" {
+    local copy="$BATS_TEST_TMPDIR/bin/pingstat"
+    mkdir -p "$BATS_TEST_TMPDIR/bin"
+    cp "$PINGSTAT" "$copy"
+    servers ok.test
+    "$copy" -p
+
+    run "$copy" --uninstall < /dev/null
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Uninstall cancelled."* ]]
+    run bash -c "echo n | '$copy' --uninstall"
+    [ "$status" -eq 1 ]
+    [ -e "$copy" ] && [ -e "$DATA/ok.test.db" ] && [ -e "$XDG_CONFIG_HOME/pingstat/servers.list" ]
+
+    run bash -c "echo y | '$copy' --uninstall"
+    [ "$status" -eq 0 ]
+    [ ! -e "$copy" ] && [ ! -e "$DATA" ] && [ ! -e "$XDG_CONFIG_HOME/pingstat" ]
 }
 
 # --- Pinging ---
@@ -102,12 +158,13 @@ insert() {
     [[ "${lines[1]}" == "Pinged other.test "* ]]
 }
 
-@test "-p, -d, -m, -H and list make no network calls" {
+@test "-p, -d, -m, -H, -o and list make no network calls" {
     servers ok.test
     "$PINGSTAT" -p
     "$PINGSTAT" -d
     "$PINGSTAT" -m
     "$PINGSTAT" -H
+    "$PINGSTAT" -o
     "$PINGSTAT" list
     [ ! -e "$NET_LOG" ]
 }
@@ -153,4 +210,37 @@ insert() {
     [[ "$output" =~ $(date +%H):00\ +10\.100 ]]
     # The row from 10 days ago is outside the window
     [ "$(echo "$output" | grep -cE '^[0-9]{2}:00 ')" -eq 1 ]
+}
+
+@test "-o lists outages with start, recovery and duration" {
+    servers ok.test
+    mkdir -p "$DATA"
+    "$PINGSTAT" -d -s ok.test > /dev/null   # creates the database
+    insert ok.test "datetime('now', '-70 minutes'), 1, 2, 3, 0.5, 0"
+    insert ok.test "datetime('now', '-60 minutes'), NULL, NULL, NULL, NULL, 100"
+    insert ok.test "datetime('now', '-55 minutes'), NULL, NULL, NULL, NULL, 100"
+    insert ok.test "datetime('now', '-50 minutes'), NULL, NULL, NULL, NULL, 100"
+    insert ok.test "datetime('now', '-40 minutes'), 1, 2, 3, 0.5, 25"
+    insert ok.test "datetime('now', '-5 minutes'), NULL, NULL, NULL, NULL, 100"
+    # Outside the default 30-day window
+    insert ok.test "datetime('now', '-40 days'), NULL, NULL, NULL, NULL, 100"
+
+    run "$PINGSTAT" -o -s ok.test
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Outages for 'ok.test' (last 30 days)"* ]]
+    [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 2 ]
+    # Newest first: the ongoing one, then the 20-minute one with 3 failed runs
+    [[ "$output" =~ ongoing\ +0h\ 0[45]m\ +1 ]]
+    [[ "$output" =~ $(date -d '-60 minutes' '+%Y-%m-%d %H:%M').{4}\ +$(date -d '-40 minutes' '+%Y-%m-%d %H:%M').{4}\ +0h\ 20m\ +3 ]]
+
+    run "$PINGSTAT" -o 60 -s ok.test
+    [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 3 ]
+}
+
+@test "-o says so when there were no outages" {
+    servers ok.test
+    "$PINGSTAT" -p
+    run "$PINGSTAT" -o
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"No outages."* ]]
 }

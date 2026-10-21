@@ -6,6 +6,20 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.0] - 2026-10-21
+### Added
+- `-o [N]`: list outages (consecutive runs with 100% loss) in the last N days (default 30)
+
+### Changed
+- The server list is now `servers.list`, one server per line with `#` comments, and is no longer executed as Bash. `servers.conf` is converted automatically on the first run and kept as `servers.conf.bak`
+- `add` accepts only host names and IP addresses, so a name can no longer be passed to `ping` as an option or escape the data directory
+- `--uninstall` asks for confirmation before deleting anything
+
+### Fixed
+- The `add` prompt offered "(a,d,c)" instead of "(a,n,c)"
+
+---
+
 ## [1.3.0] - 2026-10-21
 ### Added
 - `-H [N]`: stats per hour of day over the last N days (default 7)
