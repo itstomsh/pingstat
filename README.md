@@ -1,227 +1,167 @@
 # pingstat
 
-A lightweight, user-level script for multi-server ping logging, storing stats per server in user-writable SQLite databases.
+[![CI](https://github.com/itstomsh/pingstat/actions/workflows/ci.yml/badge.svg)](https://github.com/itstomsh/pingstat/actions/workflows/ci.yml)
 
----
+Long-term ping statistics from the command line, like `vnstat` for latency.
 
-## Example Output
+`pingstat` pings your servers from `cron`, stores the results in one SQLite database per server and
+shows daily, monthly and hour-of-day summaries of latency, jitter and packet loss. It is a single
+Bash script: no daemon, no web UI, no root.
 
-```bash
-pingstat -d
 ```
+$ pingstat -d 7 -s 192.168.1.1
+----- Daily stats for '192.168.1.1' (last 7 days) -----
 
-```bash
 day         abs_min  avg_min  avg_avg  avg_max  abs_max  avg_jitter  avg_loss  weekday    num_pings
 ----------  -------  -------  -------  -------  -------  ----------  --------  ---------  ---------
-2025-03-09  0.056    0.083    0.133    0.183    1.171    0.031       0.0%      Sunday     56       
-2025-03-08  0.052    0.084    0.132    0.182    0.323    0.029       0.0%      Saturday   96       
-2025-03-07  0.055    0.096    0.146    0.188    0.265    0.035       8.3%      Friday     96       
-2025-03-06  0.053    0.073    0.104    0.135    0.237    0.024       3.2%      Thursday   94       
-2025-03-05  0.055    0.084    0.128    0.167    0.235    0.030       0.0%      Wednesday  96       
-2025-03-04  0.056    0.090    0.138    0.191    1.111    0.033       1.0%      Tuesday    96       
-2025-03-03  0.054    0.097    0.142    0.183    0.231    0.034       5.4%      Monday     37       
-2025-03-02  0.058    0.079    0.124    0.179    0.316    0.028       12.5%     Sunday     24       
-2025-03-01  0.059    0.087    0.132    0.174    0.223    0.027       4.2%      Saturday   24       
-2025-02-28  0.060    0.085    0.136    0.184    0.229    0.030       0.0%      Friday     28       
-2025-02-27  0.056    0.063    0.093    0.135    0.168    0.022       0.0%      Thursday   4        
+2025-03-09  0.056    0.083    0.133    0.183    1.171    0.031       0.0%      Sunday     56
+2025-03-08  0.052    0.084    0.132    0.182    0.323    0.029       0.0%      Saturday   96
+2025-03-07  0.055    0.096    0.146    0.188    0.265    0.035       8.3%      Friday     96
+2025-03-06  0.053    0.073    0.104    0.135    0.237    0.024       3.2%      Thursday   94
+2025-03-05  0.055    0.084    0.128    0.167    0.235    0.030       0.0%      Wednesday  96
+2025-03-04  0.056    0.090    0.138    0.191    1.111    0.033       1.0%      Tuesday    96
+2025-03-03  0.054    0.097    0.142    0.183    0.231    0.034       5.4%      Monday     37
 ---------------------------------------------------------------------------------------------------
 
 Note: Times are in milliseconds (ms), and packet loss in %.
 ```
 
-### **Stat Definitions**
+## Quick start
 
-- **abs_min** – absolute minimum (quickest response of the day/month).
-- **avg_min** – average minimum ping over the day.
-- **avg_avg** – average ping of all requests for that day.
-- **avg_max** – average of the maximum ping values recorded.
-- **abs_max** – absolute maximum (the slowest response recorded).
-- **avg_jitter** – average jitter (`mdev`, or `stddev` on BSD/macOS); `-` on BusyBox, whose ping does not report it.
-- **avg_loss** – average packet loss percentage for the day/month/hour.
-- **weekday** – day of the week (only for the -d flag).
-- **num_pings** – number of pings for the day/month/hour.
+```bash
+curl -fsSL https://raw.githubusercontent.com/itstomsh/pingstat/main/install -o install.sh
+bash install.sh && rm install.sh   # or: sudo bash install.sh, for all users
 
-Days, months and hours follow the machine's local time zone. A run where the server does not answer is recorded as 100% loss, so outages are part of the stats; its latency columns show `-` when no ping of the day/month got a reply.
+pingstat add kernel.org
+crontab -e                         # add: */5 * * * * pingstat -p
+pingstat -d                        # a few days later
+```
 
----
+## Requirements
 
-## Features
-
-✅ **Manage multiple servers** (`add`, `remove`, `list`) without manually editing config files.  
-✅ **Log ping statistics** (`min/avg/max/mdev/loss`) into a dedicated SQLite `.db` file per server.  
-✅ **View historical stats** with daily (`-d`) or monthly (`-m`) aggregation.  
-✅ **Hourly profile** (`-H`) to see at which hours of the day the connection gets worse.  
-✅ **Works with iputils, BusyBox and BSD/macOS `ping`**, pinging all servers in parallel.  
-✅ **Minimal dependencies** – requires only `bash`, `ping`, `sqlite3`, and `curl` or `wget` (for install); `flock` (util-linux) is used when available.  
-✅ **Automate pings** using `cron` for long-term monitoring.  
-
----
+- `bash`, `ping` (iputils, BusyBox or BSD/macOS) and `sqlite3`
+- `curl` or `wget` for installing and updating
+- `flock` (util-linux) is optional: with it, a run that is still pinging a server is not started twice
 
 ## Installation
 
-### **System-wide Installation** (Requires `sudo` but only for installation!)
+The install script puts `pingstat` in `/usr/bin` when run with `sudo` (for all users), otherwise in
+`~/bin` (it offers to add `~/bin` to your `PATH`). `pingstat` itself always runs as a normal user and
+keeps its data per user.
 
 ```bash
-wget -q "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -O install.sh && sudo bash install.sh && rm install.sh
+curl -fsSL https://raw.githubusercontent.com/itstomsh/pingstat/main/install -o install.sh
+sudo bash install.sh         # system-wide; or `bash install.sh` for your user only
+rm install.sh
 ```
-or (if you prefer curl):
+
+With `wget`, download it with `wget -q https://raw.githubusercontent.com/itstomsh/pingstat/main/install -O install.sh`.
+
+To install a specific version, pass it to the script: `bash install.sh 1.3.0`. Versions are listed in
+the [CHANGELOG](CHANGELOG.md).
+
+> **Installed 1.1.0 or older?** Those versions look for updates on Codeberg, where pingstat is no
+> longer published. Run the install script above once; your servers and data are kept.
+
+## Usage
+
+| Command | What it does |
+| --- | --- |
+| `pingstat add <server>` | Add a server (asks what to do if it does not answer a test ping) |
+| `pingstat remove <server>` | Remove a server from the list (its data is kept) |
+| `pingstat list` | List servers and their database files |
+| `pingstat -p` | Ping all servers once (4 pings each, in parallel) and store the results |
+| `pingstat -d [N]` | Daily stats for the last `N` days (default 20) |
+| `pingstat -m [N]` | Monthly stats for the last `N` months (default 12) |
+| `pingstat -H [N]` | Stats per hour of day over the last `N` days (default 7) |
+| `-s <server>` | Limit `-p`, `-d`, `-m` or `-H` to one server |
+| `--version`, `--update`, `--force-update` | Show the version, update to the latest one, reinstall it |
+| `--uninstall` | Remove pingstat **and all its data** for your user |
 
 ```bash
-curl -sL "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -o install.sh && sudo bash install.sh && rm install.sh
+pingstat -d 5 -s gnu.org   # last 5 days for gnu.org only
+pingstat -H 30             # which hours of the day were worst in the last 30 days
 ```
 
-This installs `pingstat` in `/usr/bin/`, making it available to all users.
+### Stats columns
 
-### **User-Level Installation** (No `sudo`)
+| Column | Meaning |
+| --- | --- |
+| `abs_min` / `abs_max` | Fastest / slowest single reply in the period |
+| `avg_min` / `avg_max` | Average of each run's fastest / slowest reply |
+| `avg_avg` | Average latency |
+| `avg_jitter` | Average jitter (`mdev`, `stddev` on BSD/macOS); `-` on BusyBox, whose `ping` does not report it |
+| `avg_loss` | Average packet loss |
+| `weekday` | Day of the week (`-d` only) |
+| `num_pings` | Number of runs in the period (each run sends 4 pings) |
 
-```bash
-wget -q "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -O install.sh && bash install.sh && rm install.sh
-```
+Times are in milliseconds. Days, months and hours follow the machine's local time zone.
 
-or:
+A run where the server does not answer, or its name does not resolve, is stored as 100% loss, so
+outages show up in `avg_loss`. Latency columns show `-` when no run in the period got a reply.
 
-```bash
-curl -sL "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -o install.sh && bash install.sh && rm install.sh
-```
-*(Ensure `~/bin` is in your `$PATH` to run `pingstat` easily.)*
+## Running from cron
 
-### **Install a Specific Version** (e.g., `1.3.0`)
-
-```bash
-wget -q "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -O install.sh && sudo bash install.sh 1.3.0 && rm install.sh
-```
-
-or:
-
-```bash
-curl -sL "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -o install.sh && sudo bash install.sh 1.3.0 && rm install.sh
-```
-
----
-
-## Basic Usage
-
-```bash
-pingstat <command> [options]
-```
-
-### **Server Management**
-- `pingstat add <server>` → Add a server (e.g., `kernel.org`).  
-- `pingstat remove <server>` → Remove a server from the list.  
-- `pingstat list` → List all configured servers.  
-
-### **Ping & Stats**
-- `pingstat -p` → Ping all servers (or use `-s <server>` for one).  
-- `pingstat -d [N]` → Show daily stats for the last `N` days (default: 20).  
-- `pingstat -m [N]` → Show monthly stats for the last `N` months (default: 12).  
-- `pingstat -H [N]` → Show stats per hour of day over the last `N` days (default: 7).  
-- `pingstat -s <server>` → Apply `-p`, `-d`, `-m`, or `-H` to a specific server.  
-
-### **Examples**
-```bash
-pingstat add kernel.org
-pingstat add gnu.org
-pingstat list
-```
-
-```bash
-pingstat -p        # Ping all servers
-pingstat -p -s gnu.org  # Ping only gnu.org
-pingstat -d 5      # Show last 5 days' stats
-pingstat -d 5 -s gnu.org  # Last 5 days for gnu.org only
-pingstat -H 30     # Which hours of the day were worst in the last 30 days
-pingstat remove gnu.org  # Remove gnu.org from the list
-```
-
----
-
-## Automating with Cron
-
-To ping **all** servers every **5 minutes**, edit your crontab (`crontab -e`) and add:
+Ping all servers every 5 minutes (`crontab -e`):
 
 ```cron
 */5 * * * * pingstat -p
 ```
 
-For a single server:
+Or give a server its own schedule:
 
 ```cron
 */5 * * * * pingstat -p -s kernel.org
 ```
 
-If a run is still pinging a server when the next one starts, the next one skips that server instead of piling up (needs `flock`).
+If a run is still pinging a server when the next one starts, the next run skips that server
+(needs `flock`).
 
----
+## Files
 
-## Updating
+| Path | Contents |
+| --- | --- |
+| `~/.config/pingstat/servers.conf` | Server list (`SERVERS="kernel.org gnu.org"`) |
+| `~/.local/share/pingstat/<server>.db` | Results for one server (SQLite, table `ping_data`, timestamps in UTC) |
 
-To update to the latest version:
+Both honour `XDG_CONFIG_HOME` and `XDG_DATA_HOME`.
 
-```bash
-pingstat --update
-```
-
-Or manually by running install script as described above.
-
----
-
-## Uninstalling
-
-To remove `pingstat`, run:
+## Updating and uninstalling
 
 ```bash
-pingstat --uninstall
+pingstat --update      # uses sudo itself if pingstat is installed in /usr/bin
+pingstat --uninstall   # removes the script, your config and all your data
 ```
 
-Or manually remove:
+To remove it by hand:
 
 ```bash
-sudo rm /usr/bin/pingstat  # System-wide install
-rm -rf ~/.config/pingstat        # User config
-rm -rf ~/.local/share/pingstat   # User data
+sudo rm /usr/bin/pingstat        # or: rm ~/bin/pingstat
+rm -rf ~/.config/pingstat ~/.local/share/pingstat
 ```
-*(Adjust paths if you installed locally.)*
 
----
+Remove the `pingstat` line from your crontab as well.
+
 ## Troubleshooting
 
-### Script exits silently with no output?
+**`pingstat` exits without output.** `servers.conf` is read as Bash, so a syntax error in it stops the
+script. Check that it is a single line like `SERVERS="kernel.org gnu.org"`, or delete it and add the
+servers again; their data is kept.
 
-If you're using a custom config or modified version, ensure your config file is valid Bash syntax:
-
-```bash
-cat ~/.config/pingstat/servers.conf
-```
-A working config might look like:
-```bash
-SERVERS="kernel.org gnu.org"
-```
-If it's empty or corrupted, just delete it:
-```bash
-rm ~/.config/pingstat/servers.conf
-```
-If that doesn’t help, try reinstalling `pingstat` (this will not delete your current data):
-```bash
-pingstat --force-update
-```
-And if that still doesn’t help, there may be a bug in the script (oops — my fault 😅).
-As a quick workaround, you can comment out this line in the script:
-```bash
-set -euo pipefail
-```
-⚠️ Only do this if you know what you’re doing, and please open an issue so I can fix the root cause.
+**All latency columns show `-`.** Either the server never answered (see `avg_loss`), or your `ping`
+prints a format pingstat does not recognise. Run `ping -c 4 <server>` and
+[open an issue](https://github.com/itstomsh/pingstat/issues) with its output.
 
 ## Development
 
-Tests use [bats](https://github.com/bats-core/bats-core) with a fake `ping` (`tests/bin/`) and a real `sqlite3`:
+Tests use [bats](https://github.com/bats-core/bats-core) with a fake `ping` in `tests/bin/` and a real
+`sqlite3`. Both checks run on every push in GitHub Actions:
 
 ```bash
 shellcheck pingstat install tests/bin/* tests/*.bats
 bats tests
 ```
 
-Both run on every push in GitHub Actions.
-
 ## License
 
-Licensed under [MIT](LICENSE).
+[MIT](LICENSE)
