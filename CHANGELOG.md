@@ -6,6 +6,13 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.1] - 2026-10-21
+### Fixed
+- Without a terminal (e.g. in cron), `-s` with a server that is not in the list added it to the list, because the unanswered "add it now? [Y/n]" prompt counted as yes. It now fails with a message; `add` of a server that does not answer fails as well instead of waiting for an answer
+- `-o` was slow on large databases (5.5 s for 30 days and 87 s for a year of runs every minute; now 0.1 s and 1.2 s): databases get an index on `timestamp`, added to existing ones automatically, and the query no longer searches the whole table for every outage
+
+---
+
 ## [1.4.0] - 2026-10-21
 ### Added
 - `-o [N]`: list outages (consecutive runs with 100% loss) in the last N days (default 30)

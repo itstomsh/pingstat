@@ -40,7 +40,7 @@ pingstat -d                        # a few days later
 
 ## Requirements
 
-- `bash`, `ping` (iputils, BusyBox or BSD/macOS) and `sqlite3`
+- `bash`, `ping` (iputils, BusyBox or BSD/macOS) and `sqlite3` 3.25 or newer
 - `curl` or `wget` for installing and updating
 - `flock` (util-linux) is optional: with it, a run that is still pinging a server is not started twice
 
@@ -58,7 +58,7 @@ rm install.sh
 
 With `wget`, download it with `wget -q https://raw.githubusercontent.com/itstomsh/pingstat/main/install -O install.sh`.
 
-To install a specific version, pass it to the script: `bash install.sh 1.4.0`. Versions are listed in
+To install a specific version, pass it to the script: `bash install.sh 1.4.1`. Versions are listed in
 the [CHANGELOG](CHANGELOG.md).
 
 > **Installed 1.1.0 or older?** Those versions look for updates on Codeberg, where pingstat is no
@@ -146,6 +146,9 @@ A server can also have its own, less frequent schedule:
 
 If a run is still pinging a server when the next one starts, the next run skips that server
 (needs `flock`).
+
+Without a terminal, as in cron, `pingstat` never asks anything: `-s` with a server that is not in
+the list fails with a message instead of adding it, so a typo in a cron line cannot add a server.
 
 ## Files
 

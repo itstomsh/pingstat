@@ -107,6 +107,24 @@ insert() {
     [ ! -e "$copy" ] && [ ! -e "$DATA" ] && [ ! -e "$XDG_CONFIG_HOME/pingstat" ]
 }
 
+@test "without a terminal, -s with an unknown server fails instead of adding it" {
+    servers ok.test
+    run "$PINGSTAT" -p -s typo.test < /dev/null
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Server 'typo.test' is not in your config."* ]]
+    [[ "$output" == *"Add it with 'pingstat add typo.test'."* ]]
+    [ "$(cat "$XDG_CONFIG_HOME/pingstat/servers.list")" = "ok.test" ]
+    [ ! -e "$DATA/typo.test.db" ]
+}
+
+@test "without a terminal, add of a server that does not answer fails" {
+    run "$PINGSTAT" add down.test < /dev/null
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Not added. Run 'pingstat add down.test' in a terminal"* ]]
+    run "$PINGSTAT" list
+    [[ "$output" == *"No servers in config."* ]]
+}
+
 # --- Pinging ---
 
 @test "-p records iputils output" {
@@ -235,6 +253,14 @@ insert() {
 
     run "$PINGSTAT" -o 60 -s ok.test
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 3 ]
+}
+
+@test "databases get a timestamp index, also existing ones" {
+    servers ok.test
+    mkdir -p "$DATA"
+    sqlite3 "$DATA/ok.test.db" "CREATE TABLE ping_data (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, min REAL, avg REAL, max REAL, mdev REAL, loss REAL);"
+    "$PINGSTAT" -d > /dev/null
+    [ "$(query ok.test "SELECT name FROM sqlite_master WHERE type = 'index';")" = "ping_data_timestamp" ]
 }
 
 @test "-o says so when there were no outages" {

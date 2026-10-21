@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.4.0"
+VERSION="1.4.1"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -258,16 +258,20 @@ add_server() {
     # Ping test: use a single ping request with a short timeout.
     if ! ping -c 1 -W 3 "$srv" &>/dev/null; then
         echo "Ping to '$srv' failed."
+        if [ ! -t 0 ]; then
+            echo "Not added. Run 'pingstat add $srv' in a terminal to add it anyway."
+            return 1
+        fi
         while true; do
             echo "Options: [A]dd it anyway, [N]ew address, or [C]ancel"
-            read -r -p "Your choice (a,n,c): " response
+            read -r -p "Your choice (a,n,c): " response || response="c"
             case "$response" in
                 [Aa]* )
                     echo "Adding '$srv' despite ping failure."
                     break
                     ;;
                 [Nn]* )
-                    read -r -p "Enter a new server address: " new_srv
+                    read -r -p "Enter a new server address: " new_srv || new_srv=""
                     if ! valid_server_name "$new_srv"; then
                         echo "Invalid server name '$new_srv'. Use a host name or IP address."
                         continue
@@ -347,8 +351,13 @@ check_server_exist() {
     fi
 
     echo "Server '$server' is not in your config."
+    # Without a terminal (e.g. cron) there is nobody to ask; never add it silently
+    if [ ! -t 0 ]; then
+        echo "Add it with 'pingstat add $server'."
+        return 1
+    fi
     while true; do
-        read -r -p "Would you like to add it now? [Y/n] " choice
+        read -r -p "Would you like to add it now? [Y/n] " choice || choice="n"
         case "$choice" in
             [Yy]*|"")
                 if add_server "$server"; then
@@ -381,6 +390,7 @@ CREATE TABLE IF NOT EXISTS ping_data (
     mdev REAL,
     loss REAL
 );
+CREATE INDEX IF NOT EXISTS ping_data_timestamp ON ping_data(timestamp);
 EOF
 }
 
@@ -591,26 +601,24 @@ do_show_outages() {
     result=$(sqlite3 -header -column "$dbfile" <<EOF
 WITH runs AS (
     SELECT timestamp, loss >= 100 AS down,
+           LEAD(timestamp) OVER (ORDER BY timestamp, id) AS next_run,
            ROW_NUMBER() OVER (ORDER BY timestamp, id)
          - ROW_NUMBER() OVER (PARTITION BY loss >= 100 ORDER BY timestamp, id) AS grp
     FROM ping_data
     WHERE timestamp >= datetime('now', '-$days days')
 ),
+-- The run after an outage's last failed run is the first one with a reply
+-- again; an outage whose last failed run is the newest run is still ongoing
 outages AS (
-    SELECT MIN(timestamp) AS first_down, MAX(timestamp) AS last_down, COUNT(*) AS failed_runs
+    SELECT MIN(timestamp) AS first_down, COUNT(*) AS failed_runs,
+           CASE WHEN COUNT(next_run) < COUNT(*) THEN NULL ELSE MAX(next_run) END AS back_up
     FROM runs
     WHERE down
     GROUP BY grp
 ),
-ended AS (
-    SELECT o.*,
-           (SELECT MIN(p.timestamp) FROM ping_data p
-            WHERE p.timestamp > o.last_down AND p.loss < 100) AS back_up
-    FROM outages o
-),
 timed AS (
     SELECT *, CAST(round((julianday(COALESCE(back_up, 'now')) - julianday(first_down)) * 86400) AS INTEGER) AS secs
-    FROM ended
+    FROM outages
 )
 SELECT
     datetime(first_down, 'localtime') AS started,
