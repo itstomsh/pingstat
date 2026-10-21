@@ -6,6 +6,22 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0] - 2026-10-21
+### Added
+- `-H [N]`: stats per hour of day over the last N days (default 7)
+- `avg_jitter` column (average `mdev`) in all stats views
+- Support for BusyBox and BSD/macOS `ping` output
+- Tests (bats) and ShellCheck, run in GitHub Actions
+
+### Changed
+- `-p` pings all servers in parallel and prints the results in config order
+- A server whose previous ping is still running is skipped instead of pinged twice (uses `flock` when available)
+
+### Fixed
+- The install script no longer exits when creating the install directory fails, but asks again
+
+---
+
 ## [1.2.0] - 2026-10-21
 ### Changed
 - Moved from Codeberg to GitHub (`github.com/itstomsh/pingstat`): install and update now download from there. Installs of 1.1.0 or older still check Codeberg, so reinstall once with the install script from the README

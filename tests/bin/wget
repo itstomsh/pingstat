@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Fake wget for the tests: logs the call and fails like an offline machine.
+echo "wget $*" >> "$NET_LOG"
+exit 4

@@ -51,11 +51,10 @@ if [ ! -d "$BIN_DIR" ]; then
     echo "The installation directory '$BIN_DIR' does not exist."
     
     while true; do
-        read -p "Do you want to create it? (Y/n) " create_dir
+        read -r -p "Do you want to create it? (Y/n) " create_dir
         case "$create_dir" in
             [Yy]*|"") 
-                mkdir -p "$BIN_DIR" 2>/dev/null
-                if [ $? -ne 0 ]; then
+                if ! mkdir -p "$BIN_DIR" 2>/dev/null; then
                     echo "ERROR: Could not create '$BIN_DIR'. You may not have permission."
                 else
                     echo "Created directory: $BIN_DIR"
@@ -65,7 +64,7 @@ if [ ! -d "$BIN_DIR" ]; then
             [Nn]*) 
                 echo "Specify a different install path or type 'quit' to exit."
                 while true; do
-                    read -p "Enter a new absolute install path (or type 'quit' to cancel): " NEW_PATH
+                    read -r -p "Enter a new absolute install path (or type 'quit' to cancel): " NEW_PATH
                     if [[ "$NEW_PATH" == "quit" ]]; then
                         echo "Installation aborted."
                         exit 1
@@ -76,8 +75,7 @@ if [ ! -d "$BIN_DIR" ]; then
                     else
                         BIN_DEST="$NEW_PATH/pingstat"
                         BIN_DIR="$NEW_PATH"
-                        mkdir -p "$BIN_DIR" 2>/dev/null
-                        if [ $? -ne 0 ]; then
+                        if ! mkdir -p "$BIN_DIR" 2>/dev/null; then
                             echo "ERROR: Could not create '$BIN_DIR'. You may not have permission."
                         else
                             echo "Installing to: $BIN_DIR"
@@ -135,7 +133,7 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo ""
     echo "WARNING: $BIN_DIR is not in your PATH."
     while true; do
-        read -p "Do you want to add it to your PATH automatically? (Y/n) " add_to_path
+        read -r -p "Do you want to add it to your PATH automatically? (Y/n) " add_to_path
         case "$add_to_path" in
             [Yy]*|"") 
                 SHELL_TYPE=$(basename "$SHELL")

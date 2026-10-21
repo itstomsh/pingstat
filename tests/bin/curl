@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Fake curl for the tests: logs the call and fails like an offline machine.
+echo "curl $*" >> "$NET_LOG"
+exit 6

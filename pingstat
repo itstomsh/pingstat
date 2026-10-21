@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.2.0"
+VERSION="1.3.0"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -147,7 +147,8 @@ Ping & Stats:
   -p                   Ping all servers (or one with -s).
   -d [N]               Show daily stats for last N days (default 20).
   -m [N]               Show monthly stats for last N months (default 12).
-  -s <server>          Specify a single server for -p, -d, or -m.
+  -H [N]               Show stats per hour of day over last N days (default 7).
+  -s <server>          Specify a single server for -p, -d, -m, or -H.
 
 Other Options:
   --version            Show current version.
@@ -163,6 +164,7 @@ EOF
 ###############################################################################
 read_config() {
     if [ -f "$CONFIG_FILE" ]; then
+        # shellcheck source=/dev/null
         if ! source "$CONFIG_FILE" 2>/dev/null; then
             echo "WARNING: Failed to read config file: $CONFIG_FILE"
             echo "It may contain invalid syntax."
@@ -202,14 +204,14 @@ add_server() {
         echo "Ping to '$srv' failed."
         while true; do
             echo "Options: [A]dd it anyway, [N]ew address, or [C]ancel"
-            read -p "Your choice (a,d,c): " response
+            read -r -p "Your choice (a,d,c): " response
             case "$response" in
                 [Aa]* )
                     echo "Adding '$srv' despite ping failure."
                     break
                     ;;
                 [Nn]* )
-                    read -p "Enter a new server address: " new_srv
+                    read -r -p "Enter a new server address: " new_srv
                     # Replace current srv with the new one and retest
                     srv="$new_srv"
                     if ping -c 1 -W 3 "$srv" &>/dev/null; then
@@ -286,7 +288,7 @@ check_server_exist() {
 
     echo "Server '$server' is not in your config."
     while true; do
-        read -p "Would you like to add it now? [Y/n] " choice
+        read -r -p "Would you like to add it now? [Y/n] " choice
         case "$choice" in
             [Yy]*|"")
                 if add_server "$server"; then
@@ -326,30 +328,42 @@ do_ping_one() {
     local srv="$1"
     local dbfile
     dbfile="$(get_db_path "$srv")"
+
+    # Skip this server if the previous run (e.g. from cron) is still pinging it
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>"$DATA_DIR/$srv.lock"
+        if ! flock -n 9; then
+            echo "Skipped $srv -> previous ping still running"
+            return 0
+        fi
+    fi
+
     init_db "$dbfile"
 
-    local PING_OUTPUT
     # ping exits non-zero on total loss; that is a result to record, not an error
+    local PING_OUTPUT
     PING_OUTPUT=$(ping -c 4 "$srv" 2>&1 || true)
-    local PACKET_LINE
-    PACKET_LINE=$(echo "$PING_OUTPUT" | grep "packets transmitted" || true)
 
-    local LOSS MIN AVG MAX MDEV
-    if [ -z "$PACKET_LINE" ]; then
-        LOSS=100 MIN="NULL" AVG="NULL" MAX="NULL" MDEV="NULL"
+    # iputils:     "4 packets transmitted, 3 received, 25% packet loss"
+    # BusyBox/BSD: "4 packets transmitted, 3 packets received, 25% packet loss"
+    local PACKETS_TX PACKETS_RX
+    PACKETS_TX=$(echo "$PING_OUTPUT" | sed -nE 's/^([0-9]+) packets transmitted.*/\1/p')
+    PACKETS_RX=$(echo "$PING_OUTPUT" | sed -nE 's/.* ([0-9]+) (packets )?received.*/\1/p')
+
+    local LOSS MIN="NULL" AVG="NULL" MAX="NULL" MDEV="NULL"
+    if [ -z "$PACKETS_TX" ] || [ -z "$PACKETS_RX" ] || [ "$PACKETS_TX" -eq 0 ]; then
+        LOSS=100
     else
-        local PACKETS_TX
-        local PACKETS_RX
-        PACKETS_TX=$(echo "$PACKET_LINE" | awk '{print $1}')
-        PACKETS_RX=$(echo "$PACKET_LINE" | awk '{print $4}')
         LOSS=$(awk "BEGIN {print (1 - $PACKETS_RX/$PACKETS_TX) * 100}")
 
-        local RTT_LINE
-        RTT_LINE=$(echo "$PING_OUTPUT" | grep "rtt min/avg/max/mdev" || true)
-        if [ -n "$RTT_LINE" ]; then
-            IFS='/' read -r MIN AVG MAX MDEV <<< "$(echo "$RTT_LINE" | sed 's/^.*= //; s/ ms$//')"
-        else
-            MIN="NULL" AVG="NULL" MAX="NULL" MDEV="NULL"
+        # iputils: "rtt min/avg/max/mdev = 10.1/12.5/15.0/1.2 ms"
+        # BusyBox: "round-trip min/avg/max = 10.1/12.5/15.0 ms" (no mdev)
+        # BSD:     "round-trip min/avg/max/stddev = 10.1/12.5/15.0/1.2 ms"
+        local RTT_VALUES
+        RTT_VALUES=$(echo "$PING_OUTPUT" | sed -nE 's#^(rtt|round-trip) min/avg/max[^=]*= ([0-9./]+) ms.*#\2#p')
+        if [ -n "$RTT_VALUES" ]; then
+            IFS='/' read -r MIN AVG MAX MDEV <<< "$RTT_VALUES"
+            MDEV="${MDEV:-NULL}"
         fi
     fi
 
@@ -366,7 +380,7 @@ do_ping_all() {
         if ! check_server_exist "$SINGLE_SERVER"; then
             return 1
         fi
-        do_ping_one "$SINGLE_SERVER"
+        SRV_ARR=("$SINGLE_SERVER")
     else
         IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
         if [ ${#SRV_ARR[@]} -eq 0 ]; then
@@ -374,30 +388,53 @@ do_ping_all() {
             echo "Add with 'pingstat add <server>'"
             return 1
         fi
-        for s in "${SRV_ARR[@]}"; do
-            do_ping_one "$s"
-        done
     fi
+
+    # Ping all servers in parallel, then print the results in config order
+    local tmpdir i
+    tmpdir=$(mktemp -d)
+    for i in "${!SRV_ARR[@]}"; do
+        do_ping_one "${SRV_ARR[$i]}" > "$tmpdir/$i" 2>&1 &
+    done
+    wait
+    for i in "${!SRV_ARR[@]}"; do
+        cat "$tmpdir/$i"
+    done
+    rm -rf "$tmpdir"
 }
 
-show_daily() {
-    local limit="$1"
-    [ -z "$limit" ] && limit=20
+# Run do_show_<kind> for the -s server or for all configured servers
+show_stats() {
+    local kind="$1"
+    local limit="$2"
 
     if [ -n "$SINGLE_SERVER" ]; then
-        #server_in_list "$SINGLE_SERVER" || { echo "Server '$SINGLE_SERVER' not in config."; return 1; }
         if ! check_server_exist "$SINGLE_SERVER"; then return 1; fi
-        do_show_daily "$SINGLE_SERVER" "$limit"
+        "do_show_$kind" "$SINGLE_SERVER" "$limit"
     else
         IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
         [ ${#SRV_ARR[@]} -eq 0 ] && echo "No servers in config." && echo "Add with 'pingstat add <server>'" && return 1
         for s in "${SRV_ARR[@]}"; do
-            do_show_daily "$s" "$limit"
+            "do_show_$kind" "$s" "$limit"
             echo
         done
     fi
 }
 
+# Columns shared by all stats views; '-' when no ping in the group got a reply
+stat_columns() {
+    cat <<'EOF'
+    CASE WHEN MIN(min) IS NULL THEN '-' ELSE printf('%.3f', MIN(min)) END AS abs_min,
+    CASE WHEN AVG(min) IS NULL THEN '-' ELSE printf('%.3f', AVG(min)) END AS avg_min,
+    CASE WHEN AVG(avg) IS NULL THEN '-' ELSE printf('%.3f', AVG(avg)) END AS avg_avg,
+    CASE WHEN AVG(max) IS NULL THEN '-' ELSE printf('%.3f', AVG(max)) END AS avg_max,
+    CASE WHEN MAX(max) IS NULL THEN '-' ELSE printf('%.3f', MAX(max)) END AS abs_max,
+    CASE WHEN AVG(mdev) IS NULL THEN '-' ELSE printf('%.3f', AVG(mdev)) END AS avg_jitter,
+    printf('%.1f%%', AVG(loss)) AS avg_loss
+EOF
+}
+
+# Timestamps are stored in UTC; all views group by local time
 do_show_daily() {
     local srv="$1"
     local limit="$2"
@@ -410,12 +447,7 @@ do_show_daily() {
     sqlite3 -header -column "$dbfile" <<EOF
 SELECT
     date(timestamp, 'localtime') AS day,
-    CASE WHEN MIN(min) IS NULL THEN '-' ELSE printf('%.3f', MIN(min)) END AS abs_min,
-    CASE WHEN AVG(min) IS NULL THEN '-' ELSE printf('%.3f', AVG(min)) END AS avg_min,
-    CASE WHEN AVG(avg) IS NULL THEN '-' ELSE printf('%.3f', AVG(avg)) END AS avg_avg,
-    CASE WHEN AVG(max) IS NULL THEN '-' ELSE printf('%.3f', AVG(max)) END AS avg_max,
-    CASE WHEN MAX(max) IS NULL THEN '-' ELSE printf('%.3f', MAX(max)) END AS abs_max,
-    printf('%.1f%%', AVG(loss)) AS avg_loss,
+$(stat_columns),
     CASE strftime('%w', timestamp, 'localtime')
         WHEN '0' THEN 'Sunday'
         WHEN '1' THEN 'Monday'
@@ -431,27 +463,9 @@ GROUP BY day
 ORDER BY day DESC
 LIMIT $limit;
 EOF
-    echo "-------------------------------------------------------------------------------------"
+    echo "---------------------------------------------------------------------------------------------------"
     echo ""
     echo "Note: Times are in milliseconds (ms), and packet loss in %."
-}
-
-show_monthly() {
-    local limit="$1"
-    [ -z "$limit" ] && limit=12
-
-    if [ -n "$SINGLE_SERVER" ]; then
-        #server_in_list "$SINGLE_SERVER" || { echo "Server '$SINGLE_SERVER' not in config."; return 1; }
-        if ! check_server_exist "$SINGLE_SERVER"; then return 1; fi
-        do_show_monthly "$SINGLE_SERVER" "$limit"
-    else
-        IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
-        [ ${#SRV_ARR[@]} -eq 0 ] && echo "No servers in config." && echo "Add with 'pingstat add <server>'"&& return 1
-        for s in "${SRV_ARR[@]}"; do
-            do_show_monthly "$s" "$limit"
-            echo
-        done
-    fi
 }
 
 do_show_monthly() {
@@ -466,19 +480,38 @@ do_show_monthly() {
     sqlite3 -header -column "$dbfile" <<EOF
 SELECT
     strftime('%Y-%m', timestamp, 'localtime') AS month,
-    CASE WHEN MIN(min) IS NULL THEN '-' ELSE printf('%.3f', MIN(min)) END AS abs_min,
-    CASE WHEN AVG(min) IS NULL THEN '-' ELSE printf('%.3f', AVG(min)) END AS avg_min,
-    CASE WHEN AVG(avg) IS NULL THEN '-' ELSE printf('%.3f', AVG(avg)) END AS avg_avg,
-    CASE WHEN AVG(max) IS NULL THEN '-' ELSE printf('%.3f', AVG(max)) END AS avg_max,
-    CASE WHEN MAX(max) IS NULL THEN '-' ELSE printf('%.3f', MAX(max)) END AS abs_max,
-    printf('%.1f%%', AVG(loss)) AS avg_loss,
+$(stat_columns),
     COUNT(*) AS num_pings
 FROM ping_data
 GROUP BY month
 ORDER BY month DESC
 LIMIT $limit;
 EOF
-    echo "-------------------------------------------------------------------------"
+    echo "-------------------------------------------------------------------------------------"
+    echo ""
+    echo "Note: Times are in milliseconds (ms), and packet loss in %."
+}
+
+do_show_hourly() {
+    local srv="$1"
+    local days="$2"
+    local dbfile
+    dbfile="$(get_db_path "$srv")"
+    init_db "$dbfile"
+
+    echo "----- Hourly profile for '$srv' (last $days days) -----"
+    echo ""
+    sqlite3 -header -column "$dbfile" <<EOF
+SELECT
+    strftime('%H:00', timestamp, 'localtime') AS hour,
+$(stat_columns),
+    COUNT(*) AS num_pings
+FROM ping_data
+WHERE timestamp >= datetime('now', '-$days days')
+GROUP BY hour
+ORDER BY hour;
+EOF
+    echo "-----------------------------------------------------------------------------------"
     echo ""
     echo "Note: Times are in milliseconds (ms), and packet loss in %."
 }
@@ -567,6 +600,16 @@ case "$1" in
             shift
         fi
         ;;
+    -H)
+        ACTION="hourly"
+        if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
+            HOURLY_DAYS="$2"
+            shift 2
+        else
+            HOURLY_DAYS="7"
+            shift
+        fi
+        ;;
     *)
         # Unknown option or no further action
         usage
@@ -595,10 +638,13 @@ case "$ACTION" in
         do_ping_all
         ;;
     "daily")
-        show_daily "$DAILY_LIMIT"
+        show_stats daily "$DAILY_LIMIT"
         ;;
     "monthly")
-        show_monthly "$MONTHLY_LIMIT"
+        show_stats monthly "$MONTHLY_LIMIT"
+        ;;
+    "hourly")
+        show_stats hourly "$HOURLY_DAYS"
         ;;
     *)
         usage

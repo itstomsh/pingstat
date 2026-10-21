@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y bats shellcheck sqlite3
+
+      - name: ShellCheck
+        run: shellcheck pingstat install tests/bin/* tests/*.bats
+
+      - name: Tests
+        run: bats tests
