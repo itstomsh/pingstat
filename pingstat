@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.1.0"
+VERSION="1.2.0"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -30,9 +30,9 @@ get_latest_version() {
     local version_line
 
     if command -v curl >/dev/null 2>&1; then
-        version_line=$(curl -fsL "$url" | grep -E '^VERSION=' || true)
+        version_line=$(curl -fsL --max-time 10 "$url" | grep -E '^VERSION=' || true)
     else
-        version_line=$(wget -qO- "$url" | grep -E '^VERSION=' || true)
+        version_line=$(wget -qO- -T 10 "$url" | grep -E '^VERSION=' || true)
     fi
 
     if [[ -z "$version_line" ]]; then
@@ -43,13 +43,12 @@ get_latest_version() {
     echo "$version_line" | cut -d= -f2 | tr -d '"'
 }
 
-# Latest version from remote
-if ! LATEST_VERSION=$(get_latest_version); then
-    LATEST_VERSION="unknown"
-fi
+# Latest version from remote, fetched only by --version and --update
+LATEST_VERSION=""
 
 check_version() {
     echo "Current version: $VERSION"
+    LATEST_VERSION=$(get_latest_version || true)
 
     if [ -z "$LATEST_VERSION" ]; then
         echo "WARNING: Unable to determine the latest available version."
@@ -66,6 +65,7 @@ check_version() {
 }
 
 update_pingstat() {
+    LATEST_VERSION=$(get_latest_version || true)
     if [ -z "$LATEST_VERSION" ] && [ "$FORCE" != true ]; then
         echo "ERROR: Unable to determine the latest avaible version."
         echo "Check your internet connection or the remote script content."
@@ -277,15 +277,6 @@ list_servers() {
 ###############################################################################
 # 7) Ping & Stats Functions
 ###############################################################################
-check_internet() {
-    if ping -q -c 1 -W 3 8.8.8.8 >/dev/null 2>&1 || \
-       ping -q -c 1 -W 3 1.1.1.1 >/dev/null 2>&1; then
-        return 0
-    else
-        return 1
-    fi
-}
-
 check_server_exist() {
     local server="$1"
 
@@ -338,9 +329,10 @@ do_ping_one() {
     init_db "$dbfile"
 
     local PING_OUTPUT
-    PING_OUTPUT=$(ping -c 4 "$srv" 2>&1)
+    # ping exits non-zero on total loss; that is a result to record, not an error
+    PING_OUTPUT=$(ping -c 4 "$srv" 2>&1 || true)
     local PACKET_LINE
-    PACKET_LINE=$(echo "$PING_OUTPUT" | grep "packets transmitted")
+    PACKET_LINE=$(echo "$PING_OUTPUT" | grep "packets transmitted" || true)
 
     local LOSS MIN AVG MAX MDEV
     if [ -z "$PACKET_LINE" ]; then
@@ -353,7 +345,7 @@ do_ping_one() {
         LOSS=$(awk "BEGIN {print (1 - $PACKETS_RX/$PACKETS_TX) * 100}")
 
         local RTT_LINE
-        RTT_LINE=$(echo "$PING_OUTPUT" | grep "rtt min/avg/max/mdev")
+        RTT_LINE=$(echo "$PING_OUTPUT" | grep "rtt min/avg/max/mdev" || true)
         if [ -n "$RTT_LINE" ]; then
             IFS='/' read -r MIN AVG MAX MDEV <<< "$(echo "$RTT_LINE" | sed 's/^.*= //; s/ ms$//')"
         else
@@ -370,11 +362,6 @@ EOF
 }
 
 do_ping_all() {
-    if ! check_internet; then
-        echo "No internet connection. Skipping pings."
-        return 1
-    fi
-
     if [ -n "$SINGLE_SERVER" ]; then
         if ! check_server_exist "$SINGLE_SERVER"; then
             return 1
@@ -422,14 +409,14 @@ do_show_daily() {
     echo ""
     sqlite3 -header -column "$dbfile" <<EOF
 SELECT
-    date(timestamp) AS day,
-    printf('%.3f', MIN(min)) AS abs_min,
-    printf('%.3f', AVG(min)) AS avg_min,
-    printf('%.3f', AVG(avg)) AS avg_avg,
-    printf('%.3f', AVG(max)) AS avg_max,
-    printf('%.3f', MAX(max)) AS abs_max,
+    date(timestamp, 'localtime') AS day,
+    CASE WHEN MIN(min) IS NULL THEN '-' ELSE printf('%.3f', MIN(min)) END AS abs_min,
+    CASE WHEN AVG(min) IS NULL THEN '-' ELSE printf('%.3f', AVG(min)) END AS avg_min,
+    CASE WHEN AVG(avg) IS NULL THEN '-' ELSE printf('%.3f', AVG(avg)) END AS avg_avg,
+    CASE WHEN AVG(max) IS NULL THEN '-' ELSE printf('%.3f', AVG(max)) END AS avg_max,
+    CASE WHEN MAX(max) IS NULL THEN '-' ELSE printf('%.3f', MAX(max)) END AS abs_max,
     printf('%.1f%%', AVG(loss)) AS avg_loss,
-    CASE strftime('%w', timestamp)
+    CASE strftime('%w', timestamp, 'localtime')
         WHEN '0' THEN 'Sunday'
         WHEN '1' THEN 'Monday'
         WHEN '2' THEN 'Tuesday'
@@ -478,12 +465,12 @@ do_show_monthly() {
     echo ""
     sqlite3 -header -column "$dbfile" <<EOF
 SELECT
-    strftime('%Y-%m', timestamp) AS month,
-    printf('%.3f', MIN(min)) AS abs_min,
-    printf('%.3f', AVG(min)) AS avg_min,
-    printf('%.3f', AVG(avg)) AS avg_avg,
-    printf('%.3f', AVG(max)) AS avg_max,
-    printf('%.3f', MAX(max)) AS abs_max,
+    strftime('%Y-%m', timestamp, 'localtime') AS month,
+    CASE WHEN MIN(min) IS NULL THEN '-' ELSE printf('%.3f', MIN(min)) END AS abs_min,
+    CASE WHEN AVG(min) IS NULL THEN '-' ELSE printf('%.3f', AVG(min)) END AS avg_min,
+    CASE WHEN AVG(avg) IS NULL THEN '-' ELSE printf('%.3f', AVG(avg)) END AS avg_avg,
+    CASE WHEN AVG(max) IS NULL THEN '-' ELSE printf('%.3f', AVG(max)) END AS avg_max,
+    CASE WHEN MAX(max) IS NULL THEN '-' ELSE printf('%.3f', MAX(max)) END AS abs_max,
     printf('%.1f%%', AVG(loss)) AS avg_loss,
     COUNT(*) AS num_pings
 FROM ping_data
@@ -540,7 +527,7 @@ case "$1" in
         exit 0
         ;;
     add)
-        [ -z "$2" ] && { echo "Usage: pingstat add <server>"; exit 1; }
+        [ -z "${2:-}" ] && { echo "Usage: pingstat add <server>"; exit 1; }
         add_server "$2"
         exit 0
         ;;
@@ -591,6 +578,7 @@ esac
 while [ $# -gt 0 ]; do
     case "$1" in
         -s)
+            [ -z "${2:-}" ] && { echo "Usage: -s <server>"; exit 1; }
             SINGLE_SERVER="$2"
             shift 2
             ;;

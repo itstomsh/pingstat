@@ -40,6 +40,8 @@ Note: Times are in milliseconds (ms), and packet loss in %.
 - **weekday** – day of the week (only for the -d flag).
 - **num_pings** – number of pings for the day/month.
 
+Days and months follow the machine's local time zone. A run where the server does not answer is recorded as 100% loss, so outages are part of the stats; its latency columns show `-` when no ping of the day/month got a reply.
+
 ---
 
 ## Features
@@ -80,16 +82,16 @@ curl -sL "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -o instal
 ```
 *(Ensure `~/bin` is in your `$PATH` to run `pingstat` easily.)*
 
-### **Install a Specific Version** (e.g., `1.1.0`)
+### **Install a Specific Version** (e.g., `1.2.0`)
 
 ```bash
-wget -q "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -O install.sh && sudo bash install.sh 1.1.0 && rm install.sh
+wget -q "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -O install.sh && sudo bash install.sh 1.2.0 && rm install.sh
 ```
 
 or:
 
 ```bash
-curl -sL "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -o install.sh && sudo bash install.sh 1.1.0 && rm install.sh
+curl -sL "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -o install.sh && sudo bash install.sh 1.2.0 && rm install.sh
 ```
 
 ---
