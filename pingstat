@@ -26,7 +26,7 @@ mkdir -p "$CONFIG_DIR" "$DATA_DIR"
 # 2) Version Checking & Update
 ###############################################################################
 get_latest_version() {
-    local url="https://codeberg.org/tomsh/pingstat/raw/branch/main/pingstat"
+    local url="https://raw.githubusercontent.com/itstomsh/pingstat/main/pingstat"
     local version_line
 
     if command -v curl >/dev/null 2>&1; then
@@ -86,9 +86,9 @@ update_pingstat() {
 
         TMPFILE=$(mktemp)
         if command -v curl >/dev/null 2>&1; then
-            curl -sL "https://codeberg.org/tomsh/pingstat/raw/branch/main/pingstat" -o "$TMPFILE"
+            curl -sL "https://raw.githubusercontent.com/itstomsh/pingstat/main/pingstat" -o "$TMPFILE"
         else
-            wget -qO "$TMPFILE" "https://codeberg.org/tomsh/pingstat/raw/branch/main/pingstat"
+            wget -qO "$TMPFILE" "https://raw.githubusercontent.com/itstomsh/pingstat/main/pingstat"
         fi
         
         if grep -q '^VERSION=' "$TMPFILE"; then

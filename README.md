@@ -59,12 +59,12 @@ Days and months follow the machine's local time zone. A run where the server doe
 ### **System-wide Installation** (Requires `sudo` but only for installation!)
 
 ```bash
-wget -q "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -O install.sh && sudo bash install.sh && rm install.sh
+wget -q "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -O install.sh && sudo bash install.sh && rm install.sh
 ```
 or (if you prefer curl):
 
 ```bash
-curl -sL "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -o install.sh && sudo bash install.sh && rm install.sh
+curl -sL "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -o install.sh && sudo bash install.sh && rm install.sh
 ```
 
 This installs `pingstat` in `/usr/bin/`, making it available to all users.
@@ -72,26 +72,26 @@ This installs `pingstat` in `/usr/bin/`, making it available to all users.
 ### **User-Level Installation** (No `sudo`)
 
 ```bash
-wget -q "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -O install.sh && bash install.sh && rm install.sh
+wget -q "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -O install.sh && bash install.sh && rm install.sh
 ```
 
 or:
 
 ```bash
-curl -sL "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -o install.sh && bash install.sh && rm install.sh
+curl -sL "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -o install.sh && bash install.sh && rm install.sh
 ```
 *(Ensure `~/bin` is in your `$PATH` to run `pingstat` easily.)*
 
 ### **Install a Specific Version** (e.g., `1.2.0`)
 
 ```bash
-wget -q "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -O install.sh && sudo bash install.sh 1.2.0 && rm install.sh
+wget -q "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -O install.sh && sudo bash install.sh 1.2.0 && rm install.sh
 ```
 
 or:
 
 ```bash
-curl -sL "https://codeberg.org/tomsh/pingstat/raw/branch/main/install" -o install.sh && sudo bash install.sh 1.2.0 && rm install.sh
+curl -sL "https://raw.githubusercontent.com/itstomsh/pingstat/main/install" -o install.sh && sudo bash install.sh 1.2.0 && rm install.sh
 ```
 
 ---
