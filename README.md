@@ -58,7 +58,7 @@ rm install.sh
 
 With `wget`, download it with `wget -q https://raw.githubusercontent.com/itstomsh/pingstat/main/install -O install.sh`.
 
-To install a specific version, pass it to the script: `bash install.sh 1.5.0`. Versions are listed in
+To install a specific version, pass it to the script: `bash install.sh 1.5.1`. Versions are listed in
 the [CHANGELOG](CHANGELOG.md).
 
 > **Installed 1.1.0 or older?** Those versions look for updates on Codeberg, where pingstat is no
@@ -119,7 +119,8 @@ start and full duration.
 If there are no runs for more than 3 times the usual interval (at least 3 minutes), for example
 because the machine was off, nobody knows what happened in that time. An outage then ends at its last
 failed run and `back_up` shows `monitoring gap` instead of counting the pause as downtime. The usual
-interval is the median over the period, so a database with only a handful of runs may not show a gap.
+interval is the median of the newest 1000 runs, whatever period you ask for. With fewer than a few
+runs in the database there is no usual interval yet, so a gap may not show.
 
 ### Stats columns
 

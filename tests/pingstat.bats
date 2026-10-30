@@ -140,6 +140,56 @@ path_without_curl() {
     [ ! -e "$copy" ] && [ ! -e "$DATA" ] && [ ! -e "$XDG_CONFIG_HOME/pingstat" ]
 }
 
+@test "unknown arguments fail before anything runs" {
+    servers ok.test other.test
+    local args
+    for args in "-p -S ok.test" "-p extra" "-d --not-a-real-option" "-d 7x" "-m 1 2" "-o x" "-H x" "-p -s ok.test extra"; do
+        # shellcheck disable=SC2086
+        run "$PINGSTAT" $args
+        [ "$status" -eq 1 ]
+        [[ "$output" == "Unknown argument "* ]]
+    done
+    [ ! -e "$DATA/ok.test.db" ]
+
+    run "$PINGSTAT" list extra
+    [ "$status" -eq 1 ]
+    [[ "$output" == "Unknown argument 'extra'."* ]]
+    run "$PINGSTAT" add new.test extra
+    [ "$status" -eq 1 ]
+    run "$PINGSTAT" remove ok.test other.test
+    [ "$status" -eq 1 ]
+    [ "$(cat "$XDG_CONFIG_HOME/pingstat/servers.list")" = "$(printf 'ok.test\nother.test')" ]
+}
+
+@test "--uninstall with an extra argument removes nothing" {
+    local copy="$BATS_TEST_TMPDIR/bin/pingstat"
+    mkdir -p "$BATS_TEST_TMPDIR/bin"
+    cp "$PINGSTAT" "$copy"
+    run bash -c "echo y | '$copy' --uninstall typo"
+    [ "$status" -eq 1 ]
+    [ -e "$copy" ]
+}
+
+@test "add and remove at the same time lose no changes" {
+    command -v flock >/dev/null || skip "flock not installed"
+    local s
+    for s in a b c d; do PING_STUB_SLEEP=1 "$PINGSTAT" add "$s.test" > /dev/null & done
+    wait
+    [ "$(grep -cv '^#' "$XDG_CONFIG_HOME/pingstat/servers.list")" -eq 4 ]
+
+    for s in a b c; do "$PINGSTAT" remove "$s.test" > /dev/null & done
+    wait
+    [ "$(grep -v '^#' "$XDG_CONFIG_HOME/pingstat/servers.list")" = "d.test" ]
+}
+
+@test "the same server added twice at the same time is listed once" {
+    command -v flock >/dev/null || skip "flock not installed"
+    PING_STUB_SLEEP=1 "$PINGSTAT" add ok.test > /dev/null &
+    PING_STUB_SLEEP=1 "$PINGSTAT" add ok.test > /dev/null &
+    wait
+    [ "$(grep -cv '^#' "$XDG_CONFIG_HOME/pingstat/servers.list")" -eq 1 ]
+}
+
 @test "without a terminal, -s with an unknown server fails instead of adding it" {
     servers ok.test
     run "$PINGSTAT" -p -s typo.test < /dev/null
@@ -417,6 +467,35 @@ path_without_curl() {
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 2 ]
     # Newest first: a 10-minute outage, then the one the monitor lost track of
     [[ "$output" =~ $(date -d '-50 minutes' '+%Y-%m-%d %H:%M').{4}\ +0h\ 10m\ +1 ]]
+    [[ "$output" =~ monitoring\ gap\ +0h\ 00m\ +1 ]]
+}
+
+@test "-o judges a monitoring gap the same way for every period" {
+    new_db ok.test
+    # A day of runs every minute, one failed run, 48 hours of nothing, a reply
+    query ok.test "WITH RECURSIVE n(i) AS (SELECT 2881 UNION ALL SELECT i + 1 FROM n WHERE i < 4320)
+                   INSERT INTO ping_data(timestamp, avg, loss, status)
+                   SELECT datetime('now', '-' || i || ' minutes'), 1, 0, 'ok' FROM n;"
+    run_at ok.test 2880 100
+    run_at ok.test 0 0
+
+    local n
+    for n in 3 7; do
+        run "$PINGSTAT" -o "$n" -s ok.test
+        [[ "$output" =~ monitoring\ gap\ +0h\ 00m\ +1 ]]
+    done
+    # The last thing known about it is older than the period; never a 48-hour outage
+    run "$PINGSTAT" -o 1 -s ok.test
+    [[ "$output" == *"No outages."* ]]
+}
+
+@test "-o sees a monitoring gap with only a few runs" {
+    new_db ok.test
+    run_at ok.test 2882 0
+    run_at ok.test 2881 0
+    run_at ok.test 2880 100
+    run_at ok.test 0 0
+    run "$PINGSTAT" -o 3 -s ok.test
     [[ "$output" =~ monitoring\ gap\ +0h\ 00m\ +1 ]]
 }
 

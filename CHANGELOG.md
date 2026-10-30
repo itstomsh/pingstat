@@ -6,6 +6,17 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.1] - 2026-10-30
+### Changed
+- Unknown or extra arguments are now an error with exit status 1, before anything runs. Check your cron lines: one with a typo used to run and now fails
+
+### Fixed
+- `-o` could show a monitoring gap as an outage, depending on N: `-o 1` reported 48 hours for a pause that `-o 7` recognised. The usual interval between runs now comes from the newest 1000 runs, not from the period
+- `add` or `remove` at the same time could lose one of the changes while both reported success (needs `flock`)
+- `pingstat -p -S server` pinged all servers, and `-d 7x` showed the default 20 days, because unknown arguments were ignored
+
+---
+
 ## [1.5.0] - 2026-10-30
 ### Added
 - `failed` column in `-d`, `-m` and `-H`: runs without a measurement

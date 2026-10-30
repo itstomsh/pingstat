@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.5.0"
+VERSION="1.5.1"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -216,6 +216,20 @@ read_config() {
     done < "$CONFIG_FILE"
 }
 
+# Hold this from reading the list to writing it, and read it again after locking:
+# otherwise two runs each write their own copy and one change is lost. Not held
+# while pinging or asking, which can take long.
+lock_config() {
+    command -v flock >/dev/null 2>&1 || return 0
+    exec 8>"$CONFIG_DIR/servers.lock"
+    flock 8
+    read_config > /dev/null
+}
+
+unlock_config() {
+    exec 8>&-
+}
+
 write_config() {
     local s
     IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
@@ -310,16 +324,24 @@ add_server() {
     fi
 
     # If we reach here, add the (possibly updated) server.
+    lock_config
+    if server_in_list "$srv"; then
+        unlock_config
+        echo "Server '$srv' is already in the config."
+        return 0
+    fi
     IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
     SRV_ARR+=("$srv")
     SERVERS="${SRV_ARR[*]}"
     write_config
+    unlock_config
     echo "Added server '$srv'."
     return 0
 }
 
 remove_server() {
     local srv="$1"
+    lock_config
     IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
     local NEW_ARR=()
     local found=0
@@ -338,6 +360,7 @@ remove_server() {
     else
         echo "Server '$srv' not found."
     fi
+    unlock_config
 }
 
 list_servers() {
@@ -678,12 +701,24 @@ steps AS (
     FROM runs
     WINDOW w AS (ORDER BY timestamp, id)
 ),
--- 3 times the median interval between runs, which is at least a minute with cron
+-- The usual interval comes from the newest runs, not from the runs in the window,
+-- so the same event looks the same in every window and a long pause in a short
+-- window cannot become the norm
+sample AS (
+    SELECT timestamp FROM ping_data
+    WHERE status IS NOT 'error'
+    ORDER BY timestamp DESC LIMIT 1000
+),
+intervals AS (
+    SELECT (julianday(timestamp) - julianday(LAG(timestamp) OVER (ORDER BY timestamp))) * 86400 AS secs
+    FROM sample
+),
+-- 3 times the (lower) median interval, which is at least a minute with cron
 gap(secs) AS (
-    SELECT 3 * MAX(60, COALESCE((SELECT secs_since_prev FROM steps
-                                 WHERE secs_since_prev IS NOT NULL
-                                 ORDER BY secs_since_prev LIMIT 1
-                                 OFFSET (SELECT COUNT(secs_since_prev) / 2 FROM steps)), 60))
+    SELECT 3 * MAX(60, COALESCE((SELECT secs FROM intervals
+                                 WHERE secs IS NOT NULL
+                                 ORDER BY secs LIMIT 1
+                                 OFFSET (SELECT (COUNT(secs) - 1) / 2 FROM intervals)), 60))
 ),
 grouped AS (
     SELECT *, SUM(down AND (prev_down IS NOT 1 OR secs_since_prev > (SELECT secs FROM gap)))
@@ -757,6 +792,21 @@ SINGLE_SERVER=""
 
 # If no arguments, show usage
 [ $# -eq 0 ] && usage && exit 0
+
+reject_argument() {
+    echo "Unknown argument '$1'. See 'pingstat --help'."
+    exit 1
+}
+
+# Commands that take a fixed number of arguments; the others are checked below
+case "$1" in
+    --version|--update|--force-update|--uninstall|-h|--help|list)
+        [ $# -le 1 ] || reject_argument "$2"
+        ;;
+    add|remove)
+        [ $# -le 2 ] || reject_argument "$3"
+        ;;
+esac
 
 # Handle primary arguments
 case "$1" in
@@ -856,8 +906,7 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         *)
-            # Any leftover unknown argument
-            shift
+            reject_argument "$1"
             ;;
     esac
 done
