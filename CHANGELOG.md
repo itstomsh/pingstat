@@ -6,6 +6,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.9.0] - 2026-10-30
+### Added
+- `pingstat prune --older-than N [-s server] [--yes]`: delete old runs and shrink the database. It shows how much and asks first; without a terminal it needs `--yes`
+- `list` and `status` warn about a database over `max_db_size` MB in the settings (default 100, 0 turns it off)
+
+### Changed
+- `list` is now a table with the size of each database and the date of its oldest run. Check anything that reads its output
+
+---
+
 ## [1.8.0] - 2026-10-30
 ### Added
 - `~/.config/pingstat/settings`: `key = value` lines, read and never executed

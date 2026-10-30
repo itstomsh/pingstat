@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.8.0"
+VERSION="1.9.0"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -177,7 +177,9 @@ Usage: pingstat [command] [options]
 Server Management:
   add <server>         Add a server to the config list.
   remove <server>      Remove a server from the config list.
-  list                 List all servers in the config.
+  list                 List all servers with the size of their database.
+  prune --older-than N Delete runs older than N days and shrink the database
+                       (all servers or one with -s; asks first, --yes to skip).
 
 Ping & Stats:
   -p                   Ping all servers (or one with -s).
@@ -245,6 +247,7 @@ read_settings() {
     HEARTBEAT_URL=""
     ALERT_LOSS=""
     ALERT_LATENCY=""
+    MAX_DB_SIZE=100
     [ -f "$SETTINGS_FILE" ] || return 0
 
     local key value
@@ -261,9 +264,13 @@ read_settings() {
                     continue
                 fi
                 ;;
-            alert_loss|alert_latency)
+            alert_loss|alert_latency|max_db_size)
                 if [[ "$value" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
-                    if [ "$key" = "alert_loss" ]; then ALERT_LOSS="$value"; else ALERT_LATENCY="$value"; fi
+                    case "$key" in
+                        alert_loss) ALERT_LOSS="$value" ;;
+                        alert_latency) ALERT_LATENCY="$value" ;;
+                        max_db_size) MAX_DB_SIZE="$value" ;;
+                    esac
                     continue
                 fi
                 ;;
@@ -414,6 +421,31 @@ remove_server() {
     unlock_config
 }
 
+file_size() {
+    echo $(($(wc -c < "$1")))
+}
+
+human_size() {
+    awk -v bytes="$1" 'BEGIN {
+        if (bytes < 1048576) printf "%d KB", bytes / 1024
+        else if (bytes < 1073741824) printf "%.0f MB", bytes / 1048576
+        else printf "%.1f GB", bytes / 1073741824
+    }'
+}
+
+# Shown by list and status, not by -p: cron would mail it every minute
+warn_big_databases() {
+    local srv dbfile size
+    for srv in "$@"; do
+        dbfile="$(get_db_path "$srv")"
+        [ -f "$dbfile" ] || continue
+        size=$(file_size "$dbfile")
+        if awk "BEGIN {exit !($MAX_DB_SIZE > 0 && $size > $MAX_DB_SIZE * 1048576)}"; then
+            echo "WARNING: $srv is $(human_size "$size"). Free space with: pingstat prune --older-than 365 -s $srv"
+        fi
+    done
+}
+
 list_servers() {
     IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
     if [ ${#SRV_ARR[@]} -eq 0 ]; then
@@ -421,10 +453,95 @@ list_servers() {
         echo "Add with 'pingstat add <server>'"
         return 1
     fi
-    echo "Configured servers:"
+
+    local dbfile size since
+    printf '%-30s  %-8s  %-10s  %s\n' server size since database
     for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
-        echo "  $s => $(get_db_path "$s")"
+        dbfile="$(get_db_path "$s")"
+        size="-"
+        since=""
+        if [ -f "$dbfile" ]; then
+            size=$(human_size "$(file_size "$dbfile")")
+            since=$(run_sql "$dbfile" "SELECT date(MIN(timestamp), 'localtime') FROM ping_data;" 2>/dev/null || true)
+        fi
+        printf '%-30s  %-8s  %-10s  %s\n' "$s" "$size" "${since:--}" "$dbfile"
     done
+    warn_big_databases "${SRV_ARR[@]}"
+}
+
+# Also takes -s with a server that was removed from the list, whose data is kept
+do_prune() {
+    local days="$1" yes="$2"
+    local cutoff="datetime('now', '-$days days')"
+    local srv dbfile old total=0 failed=0 answer before after
+
+    if [ -n "$SINGLE_SERVER" ]; then
+        if ! valid_server_name "$SINGLE_SERVER" || [ ! -f "$(get_db_path "$SINGLE_SERVER")" ]; then
+            echo "No database for '$SINGLE_SERVER'."
+            return 1
+        fi
+        SRV_ARR=("$SINGLE_SERVER")
+    else
+        IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
+        if [ ${#SRV_ARR[@]} -eq 0 ]; then
+            echo "No servers in config."
+            echo "Add with 'pingstat add <server>'"
+            return 1
+        fi
+    fi
+
+    for srv in "${SRV_ARR[@]}"; do
+        dbfile="$(get_db_path "$srv")"
+        [ -f "$dbfile" ] || continue
+        old=$(run_sql "$dbfile" "SELECT COUNT(*) FROM ping_data WHERE timestamp < $cutoff;")
+        echo "$srv: $old runs older than $days days"
+        total=$((total + old))
+    done
+
+    if [ "$total" -eq 0 ]; then
+        echo "Nothing to delete."
+        return 0
+    fi
+
+    if [ "$yes" != true ]; then
+        if [ ! -t 0 ]; then
+            echo "Not deleted. Run this in a terminal, or add --yes."
+            return 1
+        fi
+        echo "They are gone for good, also from -d, -m, -H and -o."
+        read -r -p "Delete them? [y/N] " answer || answer=""
+        case "$answer" in
+            [Yy]*) ;;
+            *)
+                echo "Nothing deleted."
+                return 1
+                ;;
+        esac
+    fi
+
+    for srv in "${SRV_ARR[@]}"; do
+        dbfile="$(get_db_path "$srv")"
+        [ -f "$dbfile" ] || continue
+        before=$(file_size "$dbfile")
+        # A run for this server skips while this holds the lock of do_ping_one.
+        # VACUUM is what gives the space back; it needs as much again for a moment.
+        if ( if command -v flock >/dev/null 2>&1; then
+                 exec 9>"$DATA_DIR/$srv.lock"
+                 flock 9
+             fi
+             run_sql "$dbfile" <<EOF
+DELETE FROM ping_data WHERE timestamp < $cutoff;
+VACUUM;
+EOF
+           ); then
+            after=$(file_size "$dbfile")
+            echo "Pruned $srv: $(human_size "$before") -> $(human_size "$after")"
+        else
+            echo "ERROR: Could not prune $srv."
+            failed=1
+        fi
+    done
+    return "$failed"
 }
 
 ###############################################################################
@@ -936,6 +1053,7 @@ EOF
             printf '%-30s  %-19s  %-7s  %-19s  %s\n' "$srv" "$last_run" "$state" "$since" "$loss"
         fi
     done
+    warn_big_databases "${SRV_ARR[@]}"
 }
 
 # CTEs for the failure a server is in now: gap as in usual_gap, failing(timestamp)
@@ -1071,6 +1189,8 @@ read_config
 read_settings
 SINGLE_SERVER=""
 QUIET=false
+PRUNE_DAYS=""
+PRUNE_YES=false
 
 # If no arguments, show usage
 [ $# -eq 0 ] && usage && exit 0
@@ -1136,6 +1256,10 @@ case "$1" in
         ACTION="status"
         shift
         ;;
+    prune)
+        ACTION="prune"
+        shift
+        ;;
     -d)
         ACTION="daily"
         if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
@@ -1183,6 +1307,8 @@ case "$1" in
         ;;
 esac
 
+PRUNE_USAGE="Usage: pingstat prune --older-than <days> [-s <server>] [--yes]"
+
 # Parse optional -s <server>
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -1190,6 +1316,17 @@ while [ $# -gt 0 ]; do
             [ -z "${2:-}" ] && { echo "Usage: -s <server>"; exit 1; }
             SINGLE_SERVER="$2"
             shift 2
+            ;;
+        --older-than)
+            [ "$ACTION" = "prune" ] || reject_argument "$1"
+            [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { echo "$PRUNE_USAGE"; exit 1; }
+            PRUNE_DAYS="$2"
+            shift 2
+            ;;
+        --yes)
+            [ "$ACTION" = "prune" ] || reject_argument "$1"
+            PRUNE_YES=true
+            shift
             ;;
         -q)
             [ "$ACTION" = "ping" ] || reject_argument "$1"
@@ -1209,6 +1346,10 @@ case "$ACTION" in
         ;;
     "status")
         do_show_status
+        ;;
+    "prune")
+        [ -n "$PRUNE_DAYS" ] || { echo "$PRUNE_USAGE"; exit 1; }
+        do_prune "$PRUNE_DAYS" "$PRUNE_YES"
         ;;
     "daily")
         show_stats daily "$DAILY_LIMIT"

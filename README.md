@@ -72,7 +72,8 @@ development version. Versions are listed in the [CHANGELOG](CHANGELOG.md).
 | --- | --- |
 | `pingstat add <server>` | Add a server (asks what to do if it does not answer a test ping) |
 | `pingstat remove <server>` | Remove a server from the list (its data is kept) |
-| `pingstat list` | List servers and their database files |
+| `pingstat list` | List servers, the size and age of their databases, and warn about big ones |
+| `pingstat prune --older-than N` | Delete runs older than `N` days and shrink the databases ([details](#old-data)) |
 | `pingstat -p` | Ping all servers once (4 pings each, in parallel) and store the results |
 | `pingstat -p -q` | The same, printing only errors: this is the one for cron |
 | `pingstat status` | The last result of each server, and whether runs are still arriving |
@@ -286,6 +287,29 @@ rm -rf ~/.config/pingstat ~/.local/share/pingstat
 ```
 
 Remove the `pingstat` line from your crontab as well.
+
+## Old data
+
+With a run every minute a database grows by about 30 MB a year. `pingstat list` shows how big each one
+is, and `list` and `status` warn when one passes 100 MB. Change that limit in
+`~/.config/pingstat/settings`, or turn the warning off with 0:
+
+```ini
+# Warn above this size in MB
+max_db_size = 200
+```
+
+Nothing is ever deleted automatically, because the history is what pingstat is for. To delete it
+yourself:
+
+```bash
+pingstat prune --older-than 365                # all servers; shows how much and asks first
+pingstat prune --older-than 365 -s kernel.org  # one server, also one you removed from the list
+pingstat prune --older-than 365 --yes          # without asking, as cron needs
+```
+
+Deleted runs are gone for good, also from `-d`, `-m`, `-H` and `-o`. Shrinking the file needs free disk
+space of about its size for a moment. While it runs, `-p` skips that server (needs `flock`).
 
 ## Troubleshooting
 

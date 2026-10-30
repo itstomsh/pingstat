@@ -27,9 +27,10 @@ insert() {
     query "$1" "INSERT INTO ping_data(timestamp, min, avg, max, mdev, loss) VALUES ($2);"
 }
 
-# Local time some minutes ago, to the minute
-minutes_ago() {
-    sqlite3 :memory: "SELECT strftime('%Y-%m-%d %H:%M', 'now', '-$1 minutes', 'localtime');"
+# Local time of the nth run (from 0) of a server, to the minute; from the database,
+# as the clock may have passed a minute since the run was stored
+run_minute() {
+    query "$1" "SELECT strftime('%Y-%m-%d %H:%M', timestamp, 'localtime') FROM ping_data ORDER BY id LIMIT 1 OFFSET $2;"
 }
 
 # An empty database for a server in the config
@@ -81,7 +82,7 @@ path_without_curl() {
     [[ "$output" == *"Added server 'ok.test'"* ]]
 
     run "$PINGSTAT" list
-    [[ "$output" == *"ok.test => $DATA/ok.test.db"* ]]
+    [[ "$output" == *"$DATA/ok.test.db"* ]]
 
     run "$PINGSTAT" remove ok.test
     [[ "$output" == *"Removed server 'ok.test'"* ]]
@@ -122,8 +123,8 @@ path_without_curl() {
     printf '%s\n' "# my servers" "" "  ok.test   # router" "-bad" "two.test" > "$XDG_CONFIG_HOME/pingstat/servers.list"
     run "$PINGSTAT" list
     [[ "$output" == *"Ignoring invalid server name '-bad'"* ]]
-    [[ "$output" == *"ok.test => "* ]]
-    [[ "$output" == *"two.test => "* ]]
+    [[ "$output" == *"ok.test "* ]]
+    [[ "$output" == *"two.test "* ]]
 }
 
 @test "servers.conf from before 1.4.0 is migrated without being executed" {
@@ -133,8 +134,8 @@ path_without_curl() {
     run "$PINGSTAT" list
     [ "$status" -eq 0 ]
     [[ "${lines[0]}" == "Migrated "* ]]
-    [[ "$output" == *"ok.test => "* ]]
-    [[ "$output" == *"two.test => "* ]]
+    [[ "$output" == *"ok.test "* ]]
+    [[ "$output" == *"two.test "* ]]
     [ ! -e "$BATS_TEST_TMPDIR/executed" ]
     [ ! -e "$conf" ]
     [ -e "$conf.bak" ]
@@ -416,7 +417,7 @@ path_without_curl() {
     run_at ok.test 5 NULL error  # measured nothing: still failing, not recovered
     run_at ok.test 0 100
     run "$PINGSTAT" status
-    [[ "${lines[1]}" =~ down\ +$(minutes_ago 20) ]]
+    [[ "${lines[1]}" =~ down\ +$(run_minute ok.test 4) ]]
 }
 
 @test "status shows stale when runs have stopped" {
@@ -693,6 +694,156 @@ settings() {
     [ ! -e "$NET_LOG" ]
 }
 
+# --- Database size and pruning ---
+
+# run_days_ago <server> <days>...
+runs_days_ago() {
+    local srv="$1" days
+    shift
+    for days in "$@"; do
+        insert "$srv" "datetime('now', '-$days days'), 1, 2, 3, 0.5, 0"
+    done
+}
+
+@test "list shows the size and age of each database" {
+    servers ok.test new.test
+    "$PINGSTAT" -p -s ok.test
+    run "$PINGSTAT" list
+    [ "$status" -eq 0 ]
+    [[ "${lines[0]}" =~ ^server\ +size\ +since\ +database$ ]]
+    [[ "$output" =~ ok\.test\ +[0-9]+\ KB\ +[0-9]{4}-[0-9]{2}-[0-9]{2}\ +$DATA/ok\.test\.db ]]
+    [[ "$output" =~ new\.test\ +-\ +-\ +$DATA/new\.test\.db ]]
+    [ ! -e "$DATA/new.test.db" ]
+}
+
+@test "list survives a database it cannot read" {
+    servers ok.test
+    mkdir -p "$DATA"
+    echo "this is not a database, and long enough for sqlite to notice that it is not" > "$DATA/ok.test.db"
+    run "$PINGSTAT" list
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok.test"* ]]
+}
+
+@test "list and status warn about a database over max_db_size, -p does not" {
+    settings "max_db_size=0.001"
+    servers ok.test
+    run "$PINGSTAT" -p
+    [[ "$output" != *"WARNING"* ]]
+    run "$PINGSTAT" -p -q
+    [ -z "$output" ]
+    run "$PINGSTAT" list
+    [[ "$output" == *"WARNING: ok.test is "*" KB. Free space with: pingstat prune --older-than 365 -s ok.test"* ]]
+    run "$PINGSTAT" status
+    [[ "$output" == *"WARNING: ok.test is "* ]]
+}
+
+@test "no warning under the default limit or with max_db_size=0" {
+    servers ok.test
+    "$PINGSTAT" -p
+    run "$PINGSTAT" list
+    [[ "$output" != *"WARNING"* ]]
+    settings "max_db_size=0"
+    run "$PINGSTAT" list
+    [[ "$output" != *"WARNING"* ]]
+}
+
+@test "prune deletes only old runs and shrinks the database" {
+    new_db ok.test
+    query ok.test "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
+                   INSERT INTO ping_data(timestamp, avg, loss, status)
+                   SELECT datetime('now', '-400 days', '-' || i || ' minutes'), 1, 0, 'ok' FROM n;"
+    runs_days_ago ok.test 10
+    local before after
+    before=$(wc -c < "$DATA/ok.test.db")
+
+    run "$PINGSTAT" prune --older-than 365 --yes
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok.test: 20000 runs older than 365 days"* ]]
+    [[ "$output" == *"Pruned ok.test: "*" KB -> "*" KB"* ]] || [[ "$output" == *"Pruned ok.test: "*" MB -> "*" KB"* ]]
+    [ "$(query ok.test 'SELECT COUNT(*) FROM ping_data;')" = "1" ]
+    after=$(wc -c < "$DATA/ok.test.db")
+    [ "$after" -lt "$before" ]
+}
+
+@test "prune without a terminal refuses unless told --yes" {
+    new_db ok.test
+    runs_days_ago ok.test 400
+    run "$PINGSTAT" prune --older-than 365 < /dev/null
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Not deleted. Run this in a terminal, or add --yes."* ]]
+    [ "$(query ok.test 'SELECT COUNT(*) FROM ping_data;')" = "1" ]
+}
+
+@test "prune asks in a terminal and deletes only on yes" {
+    [ "$(uname)" = "Linux" ] && command -v script >/dev/null || skip "needs util-linux script"
+    new_db ok.test
+    runs_days_ago ok.test 400
+    run script -qec "'$PINGSTAT' prune --older-than 365" /dev/null <<< "n"
+    [[ "$output" == *"Nothing deleted."* ]]
+    [ "$(query ok.test 'SELECT COUNT(*) FROM ping_data;')" = "1" ]
+
+    run script -qec "'$PINGSTAT' prune --older-than 365" /dev/null <<< "y"
+    [[ "$output" == *"Pruned ok.test"* ]]
+    [ "$(query ok.test 'SELECT COUNT(*) FROM ping_data;')" = "0" ]
+}
+
+@test "prune -s touches one server, and works for a removed one" {
+    new_db two.test
+    runs_days_ago two.test 400
+    new_db ok.test
+    runs_days_ago ok.test 400
+    servers ok.test
+
+    run "$PINGSTAT" prune --older-than 365 -s two.test --yes
+    [ "$status" -eq 0 ]
+    [ "$(query two.test 'SELECT COUNT(*) FROM ping_data;')" = "0" ]
+    [ "$(query ok.test 'SELECT COUNT(*) FROM ping_data;')" = "1" ]
+
+    run "$PINGSTAT" prune --older-than 365 -s missing.test --yes
+    [ "$status" -eq 1 ]
+    [[ "$output" == "No database for 'missing.test'." ]]
+    run "$PINGSTAT" prune --older-than 365 -s ../evil --yes
+    [ "$status" -eq 1 ]
+}
+
+@test "prune says so when there is nothing to delete" {
+    new_db ok.test
+    runs_days_ago ok.test 10
+    run "$PINGSTAT" prune --older-than 365
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Nothing to delete."* ]]
+}
+
+@test "prune needs a number of days of at least 1" {
+    new_db ok.test
+    local args
+    for args in "prune" "prune --older-than" "prune --older-than 0" "prune --older-than x" "prune --yes"; do
+        # shellcheck disable=SC2086
+        run "$PINGSTAT" $args
+        [ "$status" -eq 1 ]
+        [[ "$output" == "Usage: pingstat prune "* ]]
+    done
+    run "$PINGSTAT" -d --older-than 5
+    [ "$status" -eq 1 ]
+    [[ "$output" == "Unknown argument '--older-than'."* ]]
+    run "$PINGSTAT" -p --yes
+    [ "$status" -eq 1 ]
+}
+
+@test "prune reports a database it cannot change, and goes on" {
+    new_db a.test
+    runs_days_ago a.test 400
+    new_db b.test
+    runs_days_ago b.test 400
+    servers a.test b.test
+    chmod 444 "$DATA/a.test.db"
+    run "$PINGSTAT" prune --older-than 365 --yes
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ERROR: Could not prune a.test."* ]]
+    [[ "$output" == *"Pruned b.test"* ]]
+}
+
 # --- Stats ---
 
 @test "-d groups by local day and shows jitter" {
@@ -798,7 +949,7 @@ settings() {
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 2 ]
     # Newest first: the ongoing one, then the 20-minute one with 3 failed runs
     [[ "$output" =~ ongoing\ +0h\ 0[45]m\ +1 ]]
-    [[ "$output" =~ $(minutes_ago 60).{4}\ +$(minutes_ago 40).{4}\ +0h\ 20m\ +3 ]]
+    [[ "$output" =~ $(run_minute ok.test 1).{4}\ +$(run_minute ok.test 4).{4}\ +0h\ 20m\ +3 ]]
 
     run "$PINGSTAT" -o 60 -s ok.test
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 3 ]
@@ -812,7 +963,7 @@ settings() {
     run_at ok.test 0 0
     run "$PINGSTAT" -o 3 -s ok.test
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 1 ]
-    [[ "$output" =~ $(minutes_ago 7290).{4}\ +$(date '+%Y-%m-%d').{9}\ +121h\ 30m\ +729\ +no\ reply ]]
+    [[ "$output" =~ $(run_minute ok.test 1).{4}\ +$(run_minute ok.test 730).{4}\ +121h\ 30m\ +729\ +no\ reply ]]
 }
 
 @test "-o does not show an outage that ended before the window" {
@@ -848,7 +999,7 @@ settings() {
     run "$PINGSTAT" -o -s ok.test
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 2 ]
     # Newest first: a 10-minute outage, then the one the monitor lost track of
-    [[ "$output" =~ $(minutes_ago 50).{4}\ +0h\ 10m\ +1 ]]
+    [[ "$output" =~ $(run_minute ok.test 6).{4}\ +0h\ 10m\ +1 ]]
     [[ "$output" =~ monitoring\ gap\ +0h\ 00m\ +1 ]]
 }
 
