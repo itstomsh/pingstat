@@ -18,3 +18,40 @@ jobs:
 
       - name: Tests
         run: bats tests
+
+  # The Bash 3.2 of macOS, which cron gets there, and BSD tools
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install bats-core
+
+      - name: Use the system Bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/system-bash"
+          ln -s /bin/bash "$RUNNER_TEMP/system-bash/bash"
+          echo "$RUNNER_TEMP/system-bash" >> "$GITHUB_PATH"
+
+      - name: Versions
+        run: bash --version | head -n 1 && sqlite3 --version
+
+      - name: Tests
+        run: bats tests
+
+  # BusyBox tools. pingstat does not run as root, which containers are by default.
+  alpine:
+    runs-on: ubuntu-latest
+    container: alpine:latest
+    steps:
+      - name: Install dependencies
+        run: apk add --no-cache bash bats sqlite tzdata
+
+      - uses: actions/checkout@v4
+
+      - name: Tests
+        run: |
+          adduser -D tester
+          chown -R tester .
+          su tester -c 'bats tests'

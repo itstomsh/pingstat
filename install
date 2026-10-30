@@ -43,9 +43,6 @@ echo ""
 
 BIN_DIR=$(dirname "$BIN_DEST")
 
-# Ensure we use an absolute path for the installation directory
-BIN_DIR=$(realpath -m "$BIN_DIR")
-
 # Ensure the install directory is valid and writable
 if [ ! -d "$BIN_DIR" ]; then
     echo "The installation directory '$BIN_DIR' does not exist."

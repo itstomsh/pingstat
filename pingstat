@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.7.1"
+VERSION="1.7.2"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -244,7 +244,7 @@ write_config() {
     IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
     {
         echo "# pingstat servers, one per line"
-        for s in "${SRV_ARR[@]}"; do
+        for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
             echo "$s"
         done
     } > "$CONFIG_FILE"
@@ -257,7 +257,7 @@ migrate_old_config() {
     IFS=' ' read -ra SRV_ARR <<< "$value"
     {
         echo "# pingstat servers, one per line"
-        for s in "${SRV_ARR[@]}"; do
+        for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
             echo "$s"
         done
     } > "$CONFIG_FILE"
@@ -268,6 +268,15 @@ migrate_old_config() {
 ###############################################################################
 # 6) Server Management Functions
 ###############################################################################
+# A single ping; -W is in seconds on Linux and in milliseconds on macOS and BSD
+ping_once() {
+    if [ "$(uname)" = "Linux" ]; then
+        ping -c 1 -W 3 "$1" &>/dev/null
+    else
+        ping -c 1 -W 3000 "$1" &>/dev/null
+    fi
+}
+
 get_db_path() {
     echo "$DATA_DIR/$1.db"
 }
@@ -284,7 +293,7 @@ add_server() {
 
     # Check if the server is already in the config
     IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
-    for s in "${SRV_ARR[@]}"; do
+    for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
         if [ "$s" = "$srv" ]; then
             echo "Server '$srv' is already in the config."
             return 0
@@ -292,7 +301,7 @@ add_server() {
     done
 
     # Ping test: use a single ping request with a short timeout.
-    if ! ping -c 1 -W 3 "$srv" &>/dev/null; then
+    if ! ping_once "$srv"; then
         echo "Ping to '$srv' failed."
         if [ ! -t 0 ]; then
             echo "Not added. Run 'pingstat add $srv' in a terminal to add it anyway."
@@ -314,7 +323,7 @@ add_server() {
                     fi
                     # Replace current srv with the new one and retest
                     srv="$new_srv"
-                    if ping -c 1 -W 3 "$srv" &>/dev/null; then
+                    if ping_once "$srv"; then
                         echo "Ping to '$srv' succeeded."
                         break
                     else
@@ -354,7 +363,7 @@ remove_server() {
     IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
     local NEW_ARR=()
     local found=0
-    for s in "${SRV_ARR[@]}"; do
+    for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
         if [ "$s" = "$srv" ]; then
             found=1
             continue
@@ -363,7 +372,7 @@ remove_server() {
     done
 
     if [ "$found" -eq 1 ]; then
-        SERVERS="${NEW_ARR[*]}"
+        SERVERS="${NEW_ARR[*]-}"
         write_config
         echo "Removed server '$srv'."
     else
@@ -380,7 +389,7 @@ list_servers() {
         return 1
     fi
     echo "Configured servers:"
-    for s in "${SRV_ARR[@]}"; do
+    for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
         echo "  $s => $(get_db_path "$s")"
     done
 }
@@ -657,7 +666,7 @@ show_stats() {
     else
         IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
         [ ${#SRV_ARR[@]} -eq 0 ] && echo "No servers in config." && echo "Add with 'pingstat add <server>'" && return 1
-        for s in "${SRV_ARR[@]}"; do
+        for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
             "do_show_$kind" "$s" "$limit"
             echo
         done
@@ -957,7 +966,7 @@ EOF
 server_in_list() {
     local srv="$1"
     IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
-    for s in "${SRV_ARR[@]}"; do
+    for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
         [ "$s" = "$srv" ] && return 0
     done
     return 1

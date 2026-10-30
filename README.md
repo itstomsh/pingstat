@@ -40,7 +40,8 @@ pingstat -d                        # a few days later
 
 ## Requirements
 
-- `bash`, `ping` (iputils, BusyBox or BSD/macOS) and `sqlite3` 3.25 or newer
+- `bash`, `ping` (iputils, BusyBox or BSD/macOS) and `sqlite3` 3.25 or newer; CI runs on Ubuntu, on
+  macOS with its Bash 3.2, and on Alpine with BusyBox
 - `curl` or `wget` for installing and updating
 - `flock` (util-linux) is optional: with it, a run that is still pinging a server is not started twice
 

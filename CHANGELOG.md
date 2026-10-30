@@ -6,6 +6,17 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.7.2] - 2026-10-30
+### Fixed
+- macOS and BSD: `add` gave the test ping 3 milliseconds instead of 3 seconds, so servers looked unreachable
+- Bash before 4.4, like the one on macOS: an empty server list stopped `add` and `remove` with an error
+- The install script no longer needs `realpath -m`, which macOS does not have
+
+### Changed
+- CI also runs the tests on macOS and Alpine
+
+---
+
 ## [1.7.1] - 2026-10-30
 ### Added
 - `on_change` gets a fifth argument with `up`: how long the failure lasted, or `unknown` if monitoring stopped during it

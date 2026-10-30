@@ -27,6 +27,11 @@ insert() {
     query "$1" "INSERT INTO ping_data(timestamp, min, avg, max, mdev, loss) VALUES ($2);"
 }
 
+# Local time some minutes ago, to the minute
+minutes_ago() {
+    sqlite3 :memory: "SELECT strftime('%Y-%m-%d %H:%M', 'now', '-$1 minutes', 'localtime');"
+}
+
 # An empty database for a server in the config
 new_db() {
     servers "$1"
@@ -62,7 +67,7 @@ path_without_curl() {
     local dir="$BATS_TEST_TMPDIR/nocurl" tool
     mkdir -p "$dir"
     cp "$BATS_TEST_DIRNAME/bin/ping" "$BATS_TEST_DIRNAME/bin/wget" "$dir"
-    for tool in bash env sqlite3 awk realpath dirname basename mktemp rm chmod mv grep head sort tail; do
+    for tool in bash env sqlite3 awk dirname basename mktemp rm chmod mv grep head sort tail; do
         ln -s "$(command -v "$tool")" "$dir/$tool"
     done
     echo "$dir"
@@ -102,6 +107,15 @@ path_without_curl() {
     done
     run "$PINGSTAT" add 2001:db8::1
     [ "$status" -eq 0 ]
+}
+
+@test "the last server can be removed, and then one added again" {
+    servers ok.test
+    run "$PINGSTAT" remove ok.test
+    [ "$status" -eq 0 ]
+    run "$PINGSTAT" add other.test
+    [ "$status" -eq 0 ]
+    [ "$(grep -v '^#' "$XDG_CONFIG_HOME/pingstat/servers.list")" = "other.test" ]
 }
 
 @test "servers.list ignores comments, blank lines and invalid names" {
@@ -402,7 +416,7 @@ path_without_curl() {
     run_at ok.test 5 NULL error  # measured nothing: still failing, not recovered
     run_at ok.test 0 100
     run "$PINGSTAT" status
-    [[ "${lines[1]}" =~ down\ +$(date -d '-20 minutes' '+%Y-%m-%d %H:%M') ]]
+    [[ "${lines[1]}" =~ down\ +$(minutes_ago 20) ]]
 }
 
 @test "status shows stale when runs have stopped" {
@@ -615,10 +629,12 @@ EOF
     run "$PINGSTAT" -d 0 -s ok.test
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2} ')" -eq 0 ]
 
+    local old_month
+    old_month=$(sqlite3 :memory: "SELECT strftime('%Y-%m', 'now', 'start of month', '-14 months');")
     run "$PINGSTAT" -m 12 -s ok.test
-    [[ "$output" != *"$(date -d "$(date +%Y-%m-15) -14 months" +%Y-%m)"* ]]
+    [[ "$output" != *"$old_month"* ]]
     run "$PINGSTAT" -m 20 -s ok.test
-    [[ "$output" == *"$(date -d "$(date +%Y-%m-15) -14 months" +%Y-%m)"* ]]
+    [[ "$output" == *"$old_month"* ]]
 }
 
 @test "-d keeps failed runs out of avg_loss and counts them" {
@@ -680,7 +696,7 @@ EOF
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 2 ]
     # Newest first: the ongoing one, then the 20-minute one with 3 failed runs
     [[ "$output" =~ ongoing\ +0h\ 0[45]m\ +1 ]]
-    [[ "$output" =~ $(date -d '-60 minutes' '+%Y-%m-%d %H:%M').{4}\ +$(date -d '-40 minutes' '+%Y-%m-%d %H:%M').{4}\ +0h\ 20m\ +3 ]]
+    [[ "$output" =~ $(minutes_ago 60).{4}\ +$(minutes_ago 40).{4}\ +0h\ 20m\ +3 ]]
 
     run "$PINGSTAT" -o 60 -s ok.test
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 3 ]
@@ -694,7 +710,7 @@ EOF
     run_at ok.test 0 0
     run "$PINGSTAT" -o 3 -s ok.test
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 1 ]
-    [[ "$output" =~ $(date -d '-7290 minutes' '+%Y-%m-%d %H:%M').{4}\ +$(date '+%Y-%m-%d').{9}\ +121h\ 30m\ +729\ +no\ reply ]]
+    [[ "$output" =~ $(minutes_ago 7290).{4}\ +$(date '+%Y-%m-%d').{9}\ +121h\ 30m\ +729\ +no\ reply ]]
 }
 
 @test "-o does not show an outage that ended before the window" {
@@ -730,7 +746,7 @@ EOF
     run "$PINGSTAT" -o -s ok.test
     [ "$(echo "$output" | grep -cE '^[0-9]{4}-')" -eq 2 ]
     # Newest first: a 10-minute outage, then the one the monitor lost track of
-    [[ "$output" =~ $(date -d '-50 minutes' '+%Y-%m-%d %H:%M').{4}\ +0h\ 10m\ +1 ]]
+    [[ "$output" =~ $(minutes_ago 50).{4}\ +0h\ 10m\ +1 ]]
     [[ "$output" =~ monitoring\ gap\ +0h\ 00m\ +1 ]]
 }
 
@@ -891,7 +907,8 @@ EOF
     [ "$(cat "$INSTALLED")" = "$before" ]
 
     # VERSION is there, but the file ends in the middle of a function
-    sed -i '46,$d' "$NET_STUB_FILE"
+    head -n 45 "$NET_STUB_FILE" > "$NET_STUB_FILE.cut"
+    mv "$NET_STUB_FILE.cut" "$NET_STUB_FILE"
     run "$INSTALLED" --force-update
     [ "$status" -eq 1 ]
     [[ "$output" == *"not appear to be a valid pingstat script"* ]]
