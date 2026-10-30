@@ -15,6 +15,13 @@ case "$host" in
         echo "ping: $host: Name or service not known" >&2
         exit 2
         ;;
+    noroute.*)
+        echo "ping: connect: Network is unreachable" >&2
+        exit 2
+        ;;
+    weird.*)
+        echo "some ping output nobody has seen before"
+        ;;
     *.busybox)
         echo "--- $host ping statistics ---"
         echo "4 packets transmitted, 4 packets received, 0% packet loss"

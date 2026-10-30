@@ -117,16 +117,26 @@ download_file() {
     if command -v curl >/dev/null 2>&1; then
         curl -fsL "$url" -o "$dest"
     else
-        wget -qO "$dest" "$url" || { rm -f "$dest"; return 1; }
+        wget -qO "$dest" "$url"
     fi
 }
 
+# Download next to the destination and move it into place in one step, so a
+# failed or interrupted download never touches an existing installation
+TMP_DEST=$(mktemp "$BIN_DIR/.pingstat.XXXXXX")
+trap 'rm -f "$TMP_DEST"' EXIT
+
 echo "Downloading pingstat..."
-if ! download_file "$SCRIPT_URL" "$BIN_DEST"; then
+if ! download_file "$SCRIPT_URL" "$TMP_DEST"; then
     echo "Error: Failed to download pingstat."
     exit 1
 fi
-chmod +x "$BIN_DEST"
+if [ "$(head -n 1 "$TMP_DEST")" != "#!/usr/bin/env bash" ] || ! grep -q '^VERSION=' "$TMP_DEST" || ! bash -n "$TMP_DEST" 2>/dev/null; then
+    echo "Error: The downloaded file is not a valid pingstat script."
+    exit 1
+fi
+chmod 755 "$TMP_DEST"
+mv -f "$TMP_DEST" "$BIN_DEST"
 
 # Check if the install directory is in PATH
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then

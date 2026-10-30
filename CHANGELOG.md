@@ -6,6 +6,26 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.0] - 2026-10-30
+### Added
+- `failed` column in `-d`, `-m` and `-H`: runs without a measurement
+- `cause` column in `-o`: `no reply`, `dns`, `network` or `mixed`
+- `-o` shows `monitoring gap` when there are no runs for more than 3 typical intervals (at least 3 minutes) after a failed run
+
+### Changed
+- DNS errors, network errors and unrecognised `ping` output are no longer stored as 100% loss, but without a loss value and with a new `status` column (added to existing databases automatically; existing rows are unchanged). They no longer raise `avg_loss`; DNS and network errors still count as outages in `-o`, unrecognised output does not
+- `-d N` and `-m N` now mean the last N calendar days and months, today and this month included
+
+### Fixed
+- `-p` exited with status 0 when a result could not be stored. It now exits with status 1 when storing fails or `ping` output is not recognised, and still pings the other servers
+- `-d N` and `-m N` showed the last N days and months that have data, however old
+- `-o` counted a stopped monitor as downtime: a last failed run stayed `ongoing` for ever, and a pause during an outage was added to its duration
+- `-o` gave an outage that began before the period a later start and a shorter duration, depending on N
+- An interrupted install could leave a broken `pingstat`, and a failed install with `wget` deleted the existing one. The install script and `--update` now check the download and replace the script in one step
+- `--update` exited with status 0 when the download was invalid
+
+---
+
 ## [1.4.1] - 2026-10-21
 ### Fixed
 - Without a terminal (e.g. in cron), `-s` with a server that is not in the list added it to the list, because the unanswered "add it now? [Y/n]" prompt counted as yes. It now fails with a message; `add` of a server that does not answer fails as well instead of waiting for an answer

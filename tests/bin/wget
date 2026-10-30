@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
-# Fake wget for the tests: logs the call and fails like an offline machine.
+# Fake wget for the tests: logs the call and fails like an offline machine, after
+# emptying the -O file like the real one does.
 echo "wget $*" >> "$NET_LOG"
+[ "$1" = "-qO" ] && : > "$2"
 exit 4

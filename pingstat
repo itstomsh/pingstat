@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.4.1"
+VERSION="1.5.0"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -66,6 +66,11 @@ check_version() {
     fi
 }
 
+# A complete download starts as a Bash script, has a version and parses
+valid_script() {
+    [ "$(head -n 1 "$1")" = "#!/usr/bin/env bash" ] && grep -q '^VERSION=' "$1" && bash -n "$1" 2>/dev/null
+}
+
 update_pingstat() {
     LATEST_VERSION=$(get_latest_version || true)
     if [ -z "$LATEST_VERSION" ] && [ "$FORCE" != true ]; then
@@ -77,8 +82,9 @@ update_pingstat() {
     if [ "$(printf '%s\n' "$LATEST_VERSION" "$VERSION" | sort -V | head -n1)" != "$LATEST_VERSION" ] || [ "$FORCE" = true ]; then
         echo "Updating to version $LATEST_VERSION..."
 
-        # Detect installation type (system-wide or local)
-        if [ -w "$SCRIPT_PATH" ]; then
+        # Detect installation type (system-wide or local). The new file is moved
+        # into place, which needs write access to the directory.
+        if [ -w "$(dirname "$SCRIPT_PATH")" ]; then
             USE_SUDO=""
         else
             USE_SUDO="sudo"
@@ -87,21 +93,28 @@ update_pingstat() {
         echo "Updating binary at: $SCRIPT_PATH"
 
         TMPFILE=$(mktemp)
+        trap 'rm -f "$TMPFILE"' EXIT
+        local url="https://raw.githubusercontent.com/itstomsh/pingstat/main/pingstat"
         if command -v curl >/dev/null 2>&1; then
-            curl -sL "https://raw.githubusercontent.com/itstomsh/pingstat/main/pingstat" -o "$TMPFILE"
+            curl -fsL "$url" -o "$TMPFILE" || { echo "ERROR: Download failed. Nothing was changed."; exit 1; }
         else
-            wget -qO "$TMPFILE" "https://raw.githubusercontent.com/itstomsh/pingstat/main/pingstat"
+            wget -qO "$TMPFILE" "$url" || { echo "ERROR: Download failed. Nothing was changed."; exit 1; }
         fi
-        
-        if grep -q '^VERSION=' "$TMPFILE"; then
-            $USE_SUDO cp "$TMPFILE" "$SCRIPT_PATH"
-            $USE_SUDO chmod +x "$SCRIPT_PATH"
-            echo "Update complete! Running version: $LATEST_VERSION"
-        else
-            echo "ERROR: Downloaded file does not appear to be a valid pingstat script."
+
+        if ! valid_script "$TMPFILE"; then
+            echo "ERROR: Downloaded file does not appear to be a valid pingstat script. Nothing was changed."
+            exit 1
         fi
-        
-        rm -f "$TMPFILE"
+
+        # Replace in one step, so an interruption cannot leave half a script
+        if ! { $USE_SUDO cp "$TMPFILE" "$SCRIPT_PATH.new" \
+                && $USE_SUDO chmod 755 "$SCRIPT_PATH.new" \
+                && $USE_SUDO mv -f "$SCRIPT_PATH.new" "$SCRIPT_PATH"; }; then
+            $USE_SUDO rm -f "$SCRIPT_PATH.new"
+            echo "ERROR: Could not replace $SCRIPT_PATH."
+            exit 1
+        fi
+        echo "Update complete! Running version: $LATEST_VERSION"
         exit 0
     else
         echo "You are already running the latest version!"
@@ -163,7 +176,7 @@ Ping & Stats:
   -d [N]               Show daily stats for last N days (default 20).
   -m [N]               Show monthly stats for last N months (default 12).
   -H [N]               Show stats per hour of day over last N days (default 7).
-  -o [N]               List outages (runs with 100% loss) in last N days (default 30).
+  -o [N]               List outages (runs without a reply) in last N days (default 30).
   -s <server>          Specify a single server for -p, -d, -m, -H, or -o.
 
 Other Options:
@@ -392,6 +405,27 @@ CREATE TABLE IF NOT EXISTS ping_data (
 );
 CREATE INDEX IF NOT EXISTS ping_data_timestamp ON ping_data(timestamp);
 EOF
+    # Before 1.5.0 there was no status; such rows have a NULL status and failed
+    # measurements among them are indistinguishable from 100% loss
+    has_status_column "$dbfile" \
+        || sqlite3 "$dbfile" "ALTER TABLE ping_data ADD COLUMN status TEXT;" 2>/dev/null \
+        || has_status_column "$dbfile"   # another run may have just added it
+}
+
+has_status_column() {
+    [ "$(sqlite3 "$1" "SELECT COUNT(*) FROM pragma_table_info('ping_data') WHERE name = 'status';")" = "1" ]
+}
+
+# Why ping gave no statistics: dns_error and net_error mean that the network did
+# not work from here, error that pingstat could not measure anything
+classify_ping_failure() {
+    if grep -qiE 'name or service not known|name resolution|no address associated|nodename nor servname|bad address|cannot resolve|unknown host' <<< "$1"; then
+        echo "dns_error"
+    elif grep -qiE 'network is unreachable|network unreachable|no route to host' <<< "$1"; then
+        echo "net_error"
+    else
+        echo "error"
+    fi
 }
 
 do_ping_one() {
@@ -410,9 +444,10 @@ do_ping_one() {
 
     init_db "$dbfile"
 
-    # ping exits non-zero on total loss; that is a result to record, not an error
+    # ping exits non-zero on total loss; that is a result to record, not an error.
+    # LC_ALL=C: the output is parsed, it must not be translated.
     local PING_OUTPUT
-    PING_OUTPUT=$(ping -c 4 "$srv" 2>&1 || true)
+    PING_OUTPUT=$(LC_ALL=C ping -c 4 "$srv" 2>&1 || true)
 
     # iputils:     "4 packets transmitted, 3 received, 25% packet loss"
     # BusyBox/BSD: "4 packets transmitted, 3 packets received, 25% packet loss"
@@ -420,9 +455,9 @@ do_ping_one() {
     PACKETS_TX=$(echo "$PING_OUTPUT" | sed -nE 's/^([0-9]+) packets transmitted.*/\1/p')
     PACKETS_RX=$(echo "$PING_OUTPUT" | sed -nE 's/.* ([0-9]+) (packets )?received.*/\1/p')
 
-    local LOSS MIN="NULL" AVG="NULL" MAX="NULL" MDEV="NULL"
+    local STATUS="ok" LOSS="NULL" MIN="NULL" AVG="NULL" MAX="NULL" MDEV="NULL"
     if [ -z "$PACKETS_TX" ] || [ -z "$PACKETS_RX" ] || [ "$PACKETS_TX" -eq 0 ]; then
-        LOSS=100
+        STATUS=$(classify_ping_failure "$PING_OUTPUT")
     else
         LOSS=$(awk "BEGIN {print (1 - $PACKETS_RX/$PACKETS_TX) * 100}")
 
@@ -438,11 +473,22 @@ do_ping_one() {
     fi
 
     sqlite3 "$dbfile" <<EOF
-INSERT INTO ping_data(min, avg, max, mdev, loss)
-VALUES ($MIN, $AVG, $MAX, $MDEV, $LOSS);
+INSERT INTO ping_data(min, avg, max, mdev, loss, status)
+VALUES ($MIN, $AVG, $MAX, $MDEV, $LOSS, '$STATUS');
 EOF
 
-    echo "Pinged $srv -> min=$MIN avg=$AVG max=$MAX mdev=$MDEV loss=${LOSS}% -> $dbfile"
+    case "$STATUS" in
+        ok)
+            echo "Pinged $srv -> min=$MIN avg=$AVG max=$MAX mdev=$MDEV loss=${LOSS}% -> $dbfile"
+            ;;
+        error)
+            echo "ERROR: Could not measure $srv -> unexpected ping output: $(head -n 1 <<< "$PING_OUTPUT")"
+            return 1
+            ;;
+        *)
+            echo "Pinged $srv -> no result ($STATUS) -> $dbfile"
+            ;;
+    esac
 }
 
 do_ping_all() {
@@ -461,16 +507,22 @@ do_ping_all() {
     fi
 
     # Ping all servers in parallel, then print the results in config order
-    local tmpdir i
+    local tmpdir i failed=0
+    local pids=()
     tmpdir=$(mktemp -d)
     for i in "${!SRV_ARR[@]}"; do
         do_ping_one "${SRV_ARR[$i]}" > "$tmpdir/$i" 2>&1 &
+        pids[i]=$!
     done
-    wait
     for i in "${!SRV_ARR[@]}"; do
+        if ! wait "${pids[$i]}"; then
+            failed=1
+            echo "ERROR: Run for ${SRV_ARR[$i]} failed." >> "$tmpdir/$i"
+        fi
         cat "$tmpdir/$i"
     done
     rm -rf "$tmpdir"
+    return "$failed"
 }
 
 # Run do_show_<kind> for the -s server or for all configured servers
@@ -491,7 +543,8 @@ show_stats() {
     fi
 }
 
-# Columns shared by all stats views; '-' when no ping in the group got a reply
+# Columns shared by all stats views; '-' when no ping in the group got a reply.
+# failed: runs without a measurement (loss is NULL), left out of avg_loss.
 stat_columns() {
     cat <<'EOF'
     CASE WHEN MIN(min) IS NULL THEN '-' ELSE printf('%.3f', MIN(min)) END AS abs_min,
@@ -500,11 +553,13 @@ stat_columns() {
     CASE WHEN AVG(max) IS NULL THEN '-' ELSE printf('%.3f', AVG(max)) END AS avg_max,
     CASE WHEN MAX(max) IS NULL THEN '-' ELSE printf('%.3f', MAX(max)) END AS abs_max,
     CASE WHEN AVG(mdev) IS NULL THEN '-' ELSE printf('%.3f', AVG(mdev)) END AS avg_jitter,
-    printf('%.1f%%', AVG(loss)) AS avg_loss
+    CASE WHEN AVG(loss) IS NULL THEN '-' ELSE printf('%.1f%%', AVG(loss)) END AS avg_loss,
+    COUNT(*) - COUNT(loss) AS failed
 EOF
 }
 
-# Timestamps are stored in UTC; all views group by local time
+# Timestamps are stored in UTC; all views group by local time. "Last N days" and
+# "last N months" are calendar periods, including the current one.
 do_show_daily() {
     local srv="$1"
     local limit="$2"
@@ -529,11 +584,11 @@ $(stat_columns),
     END AS weekday,
     COUNT(*) AS num_pings
 FROM ping_data
+WHERE timestamp >= datetime('now', 'localtime', 'start of day', '+1 days', '-$limit days', 'utc')
 GROUP BY day
-ORDER BY day DESC
-LIMIT $limit;
+ORDER BY day DESC;
 EOF
-    echo "---------------------------------------------------------------------------------------------------"
+    echo "-----------------------------------------------------------------------------------------------------------"
     echo ""
     echo "Note: Times are in milliseconds (ms), and packet loss in %."
 }
@@ -553,11 +608,11 @@ SELECT
 $(stat_columns),
     COUNT(*) AS num_pings
 FROM ping_data
+WHERE timestamp >= datetime('now', 'localtime', 'start of month', '+1 months', '-$limit months', 'utc')
 GROUP BY month
-ORDER BY month DESC
-LIMIT $limit;
+ORDER BY month DESC;
 EOF
-    echo "-------------------------------------------------------------------------------------"
+    echo "---------------------------------------------------------------------------------------------"
     echo ""
     echo "Note: Times are in milliseconds (ms), and packet loss in %."
 }
@@ -581,13 +636,16 @@ WHERE timestamp >= datetime('now', '-$days days')
 GROUP BY hour
 ORDER BY hour;
 EOF
-    echo "-----------------------------------------------------------------------------------"
+    echo "-------------------------------------------------------------------------------------------"
     echo ""
     echo "Note: Times are in milliseconds (ms), and packet loss in %."
 }
 
-# An outage is a series of consecutive runs with 100% loss. It started at or
-# before its first failed run and ended by the next run that got a reply.
+# An outage is a series of consecutive runs without a reply: 100% loss, or a DNS
+# or network error. It started at or before its first failed run and ended by the
+# next run that got a reply. Runs with status 'error' measured nothing and are
+# treated as if they never ran. A pause of more than 3 typical intervals between
+# runs is a monitoring gap: what happened during it is unknown, so it ends an outage.
 do_show_outages() {
     local srv="$1"
     local days="$2"
@@ -599,33 +657,71 @@ do_show_outages() {
     echo ""
     local result
     result=$(sqlite3 -header -column "$dbfile" <<EOF
-WITH runs AS (
-    SELECT timestamp, loss >= 100 AS down,
-           LEAD(timestamp) OVER (ORDER BY timestamp, id) AS next_run,
-           ROW_NUMBER() OVER (ORDER BY timestamp, id)
-         - ROW_NUMBER() OVER (PARTITION BY loss >= 100 ORDER BY timestamp, id) AS grp
-    FROM ping_data
-    WHERE timestamp >= datetime('now', '-$days days')
+WITH cutoff(at) AS (
+    SELECT datetime('now', '-$days days')
 ),
--- The run after an outage's last failed run is the first one with a reply
--- again; an outage whose last failed run is the newest run is still ongoing
-outages AS (
-    SELECT MIN(timestamp) AS first_down, COUNT(*) AS failed_runs,
-           CASE WHEN COUNT(next_run) < COUNT(*) THEN NULL ELSE MAX(next_run) END AS back_up
+-- Start at the last reply before the window: an outage that began before the
+-- window then keeps its real start
+runs AS (
+    SELECT id, timestamp, status, COALESCE(loss, 100) >= 100 AS down
+    FROM ping_data
+    WHERE status IS NOT 'error'
+      AND timestamp >= COALESCE((SELECT timestamp FROM ping_data
+                                 WHERE timestamp < (SELECT at FROM cutoff) AND loss < 100
+                                 ORDER BY timestamp DESC LIMIT 1), '')
+),
+steps AS (
+    SELECT *,
+           LAG(down) OVER w AS prev_down,
+           LEAD(timestamp) OVER w AS next_run,
+           (julianday(timestamp) - julianday(LAG(timestamp) OVER w)) * 86400 AS secs_since_prev
     FROM runs
+    WINDOW w AS (ORDER BY timestamp, id)
+),
+-- 3 times the median interval between runs, which is at least a minute with cron
+gap(secs) AS (
+    SELECT 3 * MAX(60, COALESCE((SELECT secs_since_prev FROM steps
+                                 WHERE secs_since_prev IS NOT NULL
+                                 ORDER BY secs_since_prev LIMIT 1
+                                 OFFSET (SELECT COUNT(secs_since_prev) / 2 FROM steps)), 60))
+),
+grouped AS (
+    SELECT *, SUM(down AND (prev_down IS NOT 1 OR secs_since_prev > (SELECT secs FROM gap)))
+              OVER (ORDER BY timestamp, id) AS grp
+    FROM steps
+),
+outages AS (
+    SELECT MIN(timestamp) AS first_down, MAX(timestamp) AS last_down, COUNT(*) AS failed_runs,
+           SUM(status IS 'dns_error') AS dns_runs, SUM(status IS 'net_error') AS net_runs,
+           -- The run after the last failed one; NULL if that is the newest run
+           CASE WHEN COUNT(next_run) < COUNT(*) THEN NULL ELSE MAX(next_run) END AS next_run
+    FROM grouped
     WHERE down
     GROUP BY grp
 ),
-timed AS (
-    SELECT *, CAST(round((julianday(COALESCE(back_up, 'now')) - julianday(first_down)) * 86400) AS INTEGER) AS secs
+checked AS (
+    SELECT *, (julianday(COALESCE(next_run, 'now')) - julianday(last_down)) * 86400
+              > (SELECT secs FROM gap) AS gap_after
     FROM outages
+),
+timed AS (
+    SELECT *, CASE WHEN gap_after THEN last_down ELSE COALESCE(next_run, datetime('now')) END AS end_at
+    FROM checked
 )
 SELECT
     datetime(first_down, 'localtime') AS started,
-    COALESCE(datetime(back_up, 'localtime'), 'ongoing') AS back_up,
-    printf('%dh %02dm', secs / 3600, secs % 3600 / 60) AS duration,
-    failed_runs
+    CASE WHEN gap_after THEN 'monitoring gap'
+         WHEN next_run IS NULL THEN 'ongoing'
+         ELSE datetime(next_run, 'localtime') END AS back_up,
+    printf('%dh %02dm', CAST(round((julianday(end_at) - julianday(first_down)) * 86400) AS INTEGER) / 3600,
+                        CAST(round((julianday(end_at) - julianday(first_down)) * 86400) AS INTEGER) % 3600 / 60) AS duration,
+    failed_runs,
+    CASE WHEN dns_runs = failed_runs THEN 'dns'
+         WHEN net_runs = failed_runs THEN 'network'
+         WHEN dns_runs + net_runs = 0 THEN 'no reply'
+         ELSE 'mixed' END AS cause
 FROM timed
+WHERE end_at >= (SELECT at FROM cutoff)
 ORDER BY first_down DESC;
 EOF
 )
@@ -634,9 +730,11 @@ EOF
     else
         echo "$result"
     fi
-    echo "--------------------------------------------------------------"
+    echo "---------------------------------------------------------------------------"
     echo ""
     echo "Note: An outage started at or before 'started' and ended by 'back_up'."
+    echo "'monitoring gap': no runs after the last failed one, so the real end is unknown"
+    echo "and the duration stops at that run."
 }
 
 ###############################################################################

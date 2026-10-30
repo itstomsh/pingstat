@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
-# Fake curl for the tests: logs the call and fails like an offline machine.
+# Fake curl for the tests: logs the call and fails like an offline machine, or
+# serves NET_STUB_FILE if it exists, cut off after NET_STUB_LINES lines if that is set.
 echo "curl $*" >> "$NET_LOG"
-exit 6
+[ -f "${NET_STUB_FILE:-}" ] || exit 6
+
+dest=""
+while [ $# -gt 0 ]; do
+    [ "$1" = "-o" ] && dest="$2"
+    shift
+done
+if [ -z "$dest" ]; then
+    cat "$NET_STUB_FILE"
+elif [ -n "${NET_STUB_LINES:-}" ]; then
+    head -n "$NET_STUB_LINES" "$NET_STUB_FILE" > "$dest"
+    exit 18
+else
+    cat "$NET_STUB_FILE" > "$dest"
+fi
