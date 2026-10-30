@@ -6,6 +6,13 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.9.1] - 2026-10-30
+### Fixed
+- A run that read the server list while `add` or `remove` was writing it could find it empty. The list is now replaced in one step
+- The size warning always suggested `--older-than 365`, which does nothing for data younger than a year. It now suggests half the age of the data
+
+---
+
 ## [1.9.0] - 2026-10-30
 ### Added
 - `pingstat prune --older-than N [-s server] [--yes]`: delete old runs and shrink the database. It shows how much and asks first; without a terminal it needs `--yes`

@@ -119,6 +119,25 @@ path_without_curl() {
     [ "$(grep -v '^#' "$XDG_CONFIG_HOME/pingstat/servers.list")" = "other.test" ]
 }
 
+@test "writing the server list leaves no other files and keeps it readable" {
+    run "$PINGSTAT" add ok.test
+    [ "$status" -eq 0 ]
+    [ -z "$(find "$XDG_CONFIG_HOME/pingstat" -name 'servers.list.*')" ]
+    [ "$(wc -l < "$XDG_CONFIG_HOME/pingstat/servers.list")" -eq 2 ]
+    [ -n "$(find "$XDG_CONFIG_HOME/pingstat/servers.list" -perm 644)" ]
+}
+
+@test "a symlinked server list stays a symlink" {
+    local real="$BATS_TEST_TMPDIR/dotfiles/servers.list"
+    mkdir -p "$(dirname "$real")"
+    echo "ok.test" > "$real"
+    ln -s "$real" "$XDG_CONFIG_HOME/pingstat/servers.list"
+    run "$PINGSTAT" add two.test
+    [ "$status" -eq 0 ]
+    [ -L "$XDG_CONFIG_HOME/pingstat/servers.list" ]
+    [ "$(grep -v '^#' "$real")" = "$(printf 'ok.test\ntwo.test')" ]
+}
+
 @test "servers.list ignores comments, blank lines and invalid names" {
     printf '%s\n' "# my servers" "" "  ok.test   # router" "-bad" "two.test" > "$XDG_CONFIG_HOME/pingstat/servers.list"
     run "$PINGSTAT" list
@@ -292,6 +311,28 @@ path_without_curl() {
     [[ "$output" != *"Pinged readonly.test"* ]]
     [[ "$output" == *"Pinged ok.test "* ]]
     [ "$(query ok.test 'SELECT COUNT(*) FROM ping_data;')" = "1" ]
+}
+
+@test "with several servers, reports are separated and -s shows just one" {
+    servers ok.test two.test
+    "$PINGSTAT" -p
+    run "$PINGSTAT" -d
+    [[ "$output" == *"'ok.test'"*"'two.test'"* ]]
+    run "$PINGSTAT" -d -s two.test
+    [[ "$output" != *"'ok.test'"* ]]
+    run "$PINGSTAT" status -s two.test
+    [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "commands without servers say how to add one" {
+    local args
+    for args in "-p" "-d" "-o" "status" "prune --older-than 5"; do
+        # shellcheck disable=SC2086
+        run "$PINGSTAT" $args
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"No servers in config."* ]]
+        [[ "$output" == *"Add with 'pingstat add <server>'"* ]]
+    done
 }
 
 @test "-p pings servers in parallel and prints results in config order" {
@@ -733,9 +774,24 @@ runs_days_ago() {
     run "$PINGSTAT" -p -q
     [ -z "$output" ]
     run "$PINGSTAT" list
-    [[ "$output" == *"WARNING: ok.test is "*" KB. Free space with: pingstat prune --older-than 365 -s ok.test"* ]]
+    [[ "$output" == *"WARNING: ok.test is "*" KB. Free space with: pingstat prune --older-than 1 -s ok.test"* ]]
     run "$PINGSTAT" status
     [[ "$output" == *"WARNING: ok.test is "* ]]
+}
+
+@test "the size warning suggests half the age of the data" {
+    settings "max_db_size=0.001"
+    new_db ok.test
+    runs_days_ago ok.test 800 10
+    run "$PINGSTAT" list
+    [[ "$output" == *"pingstat prune --older-than 400 -s ok.test"* ]]
+
+    # Nothing to suggest for a database it cannot read
+    echo "this is not a database, and long enough for sqlite to notice that it is not" > "$DATA/ok.test.db"
+    settings "max_db_size=0.00001"
+    run "$PINGSTAT" list
+    [[ "$output" == *"WARNING: ok.test is 0 KB."* ]]
+    [[ "$output" != *"prune"* ]]
 }
 
 @test "no warning under the default limit or with max_db_size=0" {

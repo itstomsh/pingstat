@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.9.0"
+VERSION="1.9.1"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -279,28 +279,32 @@ read_settings() {
     done < "$SETTINGS_FILE"
 }
 
+# Replaced in one step, so a run that reads the list meanwhile never finds it empty.
+# A symlink, as with managed dotfiles, stays one.
 write_config() {
-    local s
+    local s tmpfile target="$CONFIG_FILE"
+    if [ -L "$CONFIG_FILE" ]; then
+        target=$(realpath "$CONFIG_FILE" 2>/dev/null || echo "$CONFIG_FILE")
+    fi
+    tmpfile=$(mktemp "$target.XXXXXX")
     IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
     {
         echo "# pingstat servers, one per line"
         for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
             echo "$s"
         done
-    } > "$CONFIG_FILE"
+    } > "$tmpfile"
+    chmod 644 "$tmpfile"
+    mv -f "$tmpfile" "$target"
 }
 
 # Convert servers.conf (SERVERS="a b c") to servers.list without running it
 migrate_old_config() {
-    local value s
+    local value
     value=$(sed -nE 's/^[[:space:]]*SERVERS=["'"'"']?([^"'"'"']*)["'"'"']?[[:space:]]*$/\1/p' "$OLD_CONFIG_FILE" | tail -n 1)
-    IFS=' ' read -ra SRV_ARR <<< "$value"
-    {
-        echo "# pingstat servers, one per line"
-        for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
-            echo "$s"
-        done
-    } > "$CONFIG_FILE"
+    SERVERS="$value"
+    write_config
+    SERVERS=""
     mv "$OLD_CONFIG_FILE" "$OLD_CONFIG_FILE.bak"
     echo "Migrated $OLD_CONFIG_FILE to $CONFIG_FILE (old file kept as servers.conf.bak)."
 }
@@ -435,13 +439,17 @@ human_size() {
 
 # Shown by list and status, not by -p: cron would mail it every minute
 warn_big_databases() {
-    local srv dbfile size
+    local srv dbfile size days hint
     for srv in "$@"; do
         dbfile="$(get_db_path "$srv")"
         [ -f "$dbfile" ] || continue
         size=$(file_size "$dbfile")
         if awk "BEGIN {exit !($MAX_DB_SIZE > 0 && $size > $MAX_DB_SIZE * 1048576)}"; then
-            echo "WARNING: $srv is $(human_size "$size"). Free space with: pingstat prune --older-than 365 -s $srv"
+            # Half the age of the data frees about half the space, whatever that age is
+            days=$(run_sql "$dbfile" "SELECT MAX(1, CAST((julianday('now') - julianday(MIN(timestamp))) / 2 AS INTEGER)) FROM ping_data;" 2>/dev/null || true)
+            hint=""
+            [ -z "$days" ] || hint=" Free space with: pingstat prune --older-than $days -s $srv"
+            echo "WARNING: $srv is $(human_size "$size").$hint"
         fi
     done
 }
@@ -482,12 +490,7 @@ do_prune() {
         fi
         SRV_ARR=("$SINGLE_SERVER")
     else
-        IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
-        if [ ${#SRV_ARR[@]} -eq 0 ]; then
-            echo "No servers in config."
-            echo "Add with 'pingstat add <server>'"
-            return 1
-        fi
+        select_servers || return 1
     fi
 
     for srv in "${SRV_ARR[@]}"; do
@@ -547,6 +550,21 @@ EOF
 ###############################################################################
 # 7) Ping & Stats Functions
 ###############################################################################
+# Put the server of -s, or all configured ones, in SRV_ARR
+select_servers() {
+    if [ -n "$SINGLE_SERVER" ]; then
+        if ! check_server_exist "$SINGLE_SERVER"; then return 1; fi
+        SRV_ARR=("$SINGLE_SERVER")
+    else
+        IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
+        if [ ${#SRV_ARR[@]} -eq 0 ]; then
+            echo "No servers in config."
+            echo "Add with 'pingstat add <server>'"
+            return 1
+        fi
+    fi
+}
+
 check_server_exist() {
     local server="$1"
 
@@ -828,19 +846,7 @@ EOF
 }
 
 do_ping_all() {
-    if [ -n "$SINGLE_SERVER" ]; then
-        if ! check_server_exist "$SINGLE_SERVER"; then
-            return 1
-        fi
-        SRV_ARR=("$SINGLE_SERVER")
-    else
-        IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
-        if [ ${#SRV_ARR[@]} -eq 0 ]; then
-            echo "No servers in config."
-            echo "Add with 'pingstat add <server>'"
-            return 1
-        fi
-    fi
+    select_servers || return 1
 
     # Ping all servers in parallel, then print the results in config order
     local tmpdir i failed=0
@@ -869,17 +875,11 @@ show_stats() {
     local kind="$1"
     local limit="$2"
 
-    if [ -n "$SINGLE_SERVER" ]; then
-        if ! check_server_exist "$SINGLE_SERVER"; then return 1; fi
-        "do_show_$kind" "$SINGLE_SERVER" "$limit"
-    else
-        IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
-        [ ${#SRV_ARR[@]} -eq 0 ] && echo "No servers in config." && echo "Add with 'pingstat add <server>'" && return 1
-        for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
-            "do_show_$kind" "$s" "$limit"
-            echo
-        done
-    fi
+    select_servers || return 1
+    for s in "${SRV_ARR[@]}"; do
+        "do_show_$kind" "$s" "$limit"
+        [ -n "$SINGLE_SERVER" ] || echo
+    done
 }
 
 # Columns shared by all stats views; '-' when no ping in the group got a reply.
@@ -1008,17 +1008,7 @@ EOF
 # One line per server: its newest run, or 'no data'. stale means that no run came
 # when one was due: cron or the machine has stopped.
 do_show_status() {
-    if [ -n "$SINGLE_SERVER" ]; then
-        if ! check_server_exist "$SINGLE_SERVER"; then return 1; fi
-        SRV_ARR=("$SINGLE_SERVER")
-    else
-        IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
-        if [ ${#SRV_ARR[@]} -eq 0 ]; then
-            echo "No servers in config."
-            echo "Add with 'pingstat add <server>'"
-            return 1
-        fi
-    fi
+    select_servers || return 1
 
     local srv dbfile row last_run state since loss
     printf '%-30s  %-19s  %-7s  %-19s  %s\n' server last_run state down_since loss
