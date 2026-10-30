@@ -3,6 +3,7 @@
 host="${*: -1}"
 [ -n "${PING_STUB_SLEEP:-}" ] && sleep "$PING_STUB_SLEEP"
 [ -n "${PING_STUB_DOWN:-}" ] && host="down.$host"
+[ -n "${PING_STUB_AS:-}" ] && host="$PING_STUB_AS"
 
 case "$host" in
     down.*)

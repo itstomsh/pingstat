@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.7.2"
+VERSION="1.8.0"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -20,6 +20,7 @@ DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pingstat"
 CONFIG_FILE="$CONFIG_DIR/servers.list"
 # Before 1.4.0: a Bash file with SERVERS="a b c", migrated by read_config
 OLD_CONFIG_FILE="$CONFIG_DIR/servers.conf"
+SETTINGS_FILE="$CONFIG_DIR/settings"
 # Optional executable, called when a server goes down or comes back
 HOOK_FILE="$CONFIG_DIR/on_change"
 # Failed runs in a row before the hook hears of it, so a lost run is no alarm
@@ -237,6 +238,38 @@ lock_config() {
 
 unlock_config() {
     exec 8>&-
+}
+
+# key=value lines; like the server list, this file is read and never executed
+read_settings() {
+    HEARTBEAT_URL=""
+    ALERT_LOSS=""
+    ALERT_LATENCY=""
+    [ -f "$SETTINGS_FILE" ] || return 0
+
+    local key value
+    while IFS='=' read -r key value || [ -n "$key" ]; do
+        key="${key//[[:space:]]/}"
+        value="${value//[[:space:]]/}"
+        case "$key" in
+            ""|\#*)
+                continue
+                ;;
+            heartbeat_url)
+                if [[ "$value" =~ ^https?://[^[:space:]]+$ ]]; then
+                    HEARTBEAT_URL="$value"
+                    continue
+                fi
+                ;;
+            alert_loss|alert_latency)
+                if [[ "$value" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                    if [ "$key" = "alert_loss" ]; then ALERT_LOSS="$value"; else ALERT_LATENCY="$value"; fi
+                    continue
+                fi
+                ;;
+        esac
+        echo "WARNING: Ignoring '$key=$value' in $SETTINGS_FILE"
+    done < "$SETTINGS_FILE"
 }
 
 write_config() {
@@ -551,6 +584,63 @@ EOF
     printf '%s\n%s\n%s\n' "$cause" "$since" "yes" > "$state_file"
 }
 
+# Tell the hook about a connection that works, but badly. Runs without any reply
+# are for notify_change and leave this state alone.
+notify_degraded() {
+    local srv="$1" dbfile="$2" status="$3" loss="$4" avg="$5"
+    local state_file="$DATA_DIR/$srv.degraded"
+    local bad="0" newest count since cause duration
+
+    [ -x "$HOOK_FILE" ] || return 0
+    [ "$status" = "ok" ] && [ "$loss" != "100" ] || return 0
+    [ -n "$ALERT_LOSS" ] && bad="$bad OR loss >= $ALERT_LOSS"
+    [ -n "$ALERT_LATENCY" ] && bad="$bad OR avg >= $ALERT_LATENCY"
+    [ "$bad" != "0" ] || return 0
+
+    IFS='|' read -r newest count since < <(run_sql "$dbfile" <<EOF
+WITH $(usual_gap),
+recent AS (
+    SELECT id, timestamp, COALESCE($bad, 0) AS bad FROM ping_data
+    WHERE status IS NOT 'error'
+    ORDER BY timestamp DESC, id DESC LIMIT $ALERT_AFTER
+)
+SELECT (SELECT bad FROM recent ORDER BY timestamp DESC, id DESC LIMIT 1),
+       COUNT(*), datetime(MIN(timestamp), 'localtime')
+FROM recent
+WHERE bad AND (julianday('now') - julianday(timestamp)) * 86400 <= (SELECT secs FROM gap) * $ALERT_AFTER;
+EOF
+)
+
+    if [ "$newest" = "0" ]; then
+        [ -e "$state_file" ] || return 0
+        { read -r cause; read -r since; } < "$state_file"
+        duration=$(failure_duration "$dbfile" "$since")
+        run_hook recovered "$srv" "$cause" "$since" "$duration" || return 1
+        rm -f "$state_file"
+        return 0
+    fi
+
+    [ ! -e "$state_file" ] || return 0
+    [ "$count" -ge "$ALERT_AFTER" ] || return 0
+    if [ -n "$ALERT_LOSS" ] && awk "BEGIN {exit !($loss >= $ALERT_LOSS)}"; then
+        cause="loss ${loss}%"
+    else
+        cause="latency $avg ms"
+    fi
+    run_hook degraded "$srv" "$cause" "$since" || return 1
+    printf '%s\n%s\n' "$cause" "$since" > "$state_file"
+}
+
+send_heartbeat() {
+    [ -n "$HEARTBEAT_URL" ] || return 0
+    # Not reaching it is what it is there to notice, not an error of this run
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS -m 10 -o /dev/null "$HEARTBEAT_URL" 2>/dev/null || true
+    else
+        wget -q -T 10 -O /dev/null "$HEARTBEAT_URL" 2>/dev/null || true
+    fi
+}
+
 do_ping_one() {
     local srv="$1"
     local dbfile
@@ -600,7 +690,8 @@ INSERT INTO ping_data(min, avg, max, mdev, loss, status)
 VALUES ($MIN, $AVG, $MAX, $MDEV, $LOSS, '$STATUS');
 EOF
 
-    if ! notify_change "$srv" "$dbfile" "$STATUS" "$LOSS"; then
+    if ! notify_change "$srv" "$dbfile" "$STATUS" "$LOSS" \
+            || ! notify_degraded "$srv" "$dbfile" "$STATUS" "$LOSS" "$AVG"; then
         echo "ERROR: The on_change hook failed for $srv. The next run tries again."
         return 1
     fi
@@ -652,6 +743,7 @@ do_ping_all() {
         fi
     done
     rm -rf "$tmpdir"
+    [ "$failed" -eq 1 ] || send_heartbeat
     return "$failed"
 }
 
@@ -976,6 +1068,7 @@ server_in_list() {
 # 9) Main Execution
 ###############################################################################
 read_config
+read_settings
 SINGLE_SERVER=""
 QUIET=false
 

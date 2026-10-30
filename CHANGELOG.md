@@ -6,6 +6,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.8.0] - 2026-10-30
+### Added
+- `~/.config/pingstat/settings`: `key = value` lines, read and never executed
+- `alert_loss` and `alert_latency`: `on_change` is called with `degraded` after 3 runs over a limit, and with `recovered` afterwards. Hook scripts that treat everything but `down` as `up` must be changed before setting a limit
+- `heartbeat_url`: `-p` calls it after a run in which nothing failed, so a service like healthchecks.io can tell you when `cron`, the machine or its connection stops
+
+---
+
 ## [1.7.2] - 2026-10-30
 ### Fixed
 - macOS and BSD: `add` gave the test ping 3 milliseconds instead of 3 seconds, so servers looked unreachable

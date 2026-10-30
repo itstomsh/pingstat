@@ -591,6 +591,108 @@ EOF
     [ ! -e "$DATA/down.test.down" ]
 }
 
+# --- Settings ---
+
+settings() {
+    printf '%s\n' "$@" > "$XDG_CONFIG_HOME/pingstat/settings"
+}
+
+@test "on_change hears of a bad connection after 3 runs, once, and of the recovery" {
+    hook
+    settings "# limits" "alert_loss = 20"
+    servers flap.test
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    [ ! -e "$HOOK_LOG" ]
+
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    [ "$(wc -l < "$HOOK_LOG")" -eq 1 ]
+    [[ "$(cat "$HOOK_LOG")" =~ ^degraded\|flap\.test\|loss\ 25%\|[0-9-]+\ [0-9:]+\|$ ]]
+
+    PING_STUB_AS=good.busybox "$PINGSTAT" -p
+    [ "$(wc -l < "$HOOK_LOG")" -eq 2 ]
+    [[ "$(tail -n 1 "$HOOK_LOG")" =~ ^recovered\|flap\.test\|loss\ 25%\|[0-9-]+\ [0-9:]+\|0h\ 00m\|$ ]]
+    [ ! -e "$DATA/flap.test.degraded" ]
+}
+
+@test "alert_latency compares the average latency" {
+    hook
+    settings "alert_latency=12.5"
+    servers flap.test
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    [[ "$(cat "$HOOK_LOG")" == "degraded|flap.test|latency 12.5 ms|"* ]]
+}
+
+@test "a good run in between stops a bad connection from being reported" {
+    hook
+    settings "alert_loss=20"
+    servers flap.test
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    PING_STUB_AS=good.busybox "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    [ ! -e "$HOOK_LOG" ]
+}
+
+@test "runs without a reply are not a bad connection" {
+    hook
+    settings "alert_loss=20"
+    new_db down.test
+    run_at down.test 30 0
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    [ "$(wc -l < "$HOOK_LOG")" -eq 1 ]
+    [[ "$(cat "$HOOK_LOG")" == "down|down.test|"* ]]
+}
+
+@test "a bad connection is not reported without limits in the settings" {
+    hook
+    servers flap.test
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    [ ! -e "$HOOK_LOG" ]
+}
+
+@test "settings warns about unknown keys and bad values and never executes the file" {
+    settings "alert_loss=lots" "nonsense=1" "heartbeat_url=ftp://x" "touch $BATS_TEST_TMPDIR/executed"
+    servers ok.test
+    run "$PINGSTAT" list
+    [[ "$output" == *"Ignoring 'alert_loss=lots'"* ]]
+    [[ "$output" == *"Ignoring 'nonsense=1'"* ]]
+    [[ "$output" == *"Ignoring 'heartbeat_url=ftp://x'"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/executed" ]
+}
+
+@test "-p calls the heartbeat URL when the run worked" {
+    settings "heartbeat_url=https://hc.test/ping/abc?a=b"
+    servers ok.test down.test
+    run "$PINGSTAT" -p -q
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(grep -c 'https://hc.test/ping/abc?a=b' "$NET_LOG")" -eq 1 ]
+}
+
+@test "-p does not call the heartbeat URL when the run failed" {
+    settings "heartbeat_url=https://hc.test/ping"
+    servers weird.test
+    run "$PINGSTAT" -p
+    [ "$status" -eq 1 ]
+    [ ! -e "$NET_LOG" ]
+}
+
+@test "reports do not call the heartbeat URL" {
+    settings "heartbeat_url=https://hc.test/ping"
+    servers ok.test
+    "$PINGSTAT" -d
+    "$PINGSTAT" status
+    [ ! -e "$NET_LOG" ]
+}
+
 # --- Stats ---
 
 @test "-d groups by local day and shows jitter" {

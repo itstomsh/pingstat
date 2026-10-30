@@ -228,14 +228,46 @@ it fails, `-p` reports an error and exits with status 1, and the next run tries 
 If the machine's own connection is down, `down` cannot get through. The first reply afterwards then
 sends `up` with the start and the duration, so you still hear about it, later.
 
+The same script can hear of a connection that works, but badly. Set a limit in
+`~/.config/pingstat/settings` and it is called with `degraded` after 3 bad runs in a row, and with
+`recovered` when a run is within the limits again. The arguments are the same, with a cause like
+`loss 25%` or `latency 800 ms`. A script from before 1.8.0 that treats everything but `down` as `up`
+needs a change first.
+
+```ini
+# Packet loss in %
+alert_loss = 20
+# Average latency in ms
+alert_latency = 300
+```
+
+Without a limit there is no such notification. The file is `key = value` lines, with comments on their
+own line; it is read, never executed.
+
+### If pingstat itself stops
+
+`on_change` cannot tell you that `cron` or the machine has stopped. A service like
+[healthchecks.io](https://healthchecks.io) can: it expects a request regularly and alerts you when
+they stop. Add its URL to the settings:
+
+```ini
+heartbeat_url = https://hc-ping.com/your-uuid
+```
+
+`pingstat -p` calls it after every run in which nothing failed. Because the request has to leave the
+machine, this also tells you when the machine's own connection is down, as soon as the service's
+grace period is over. A server that
+does not answer is a result, not a failed run, so that alone does not stop the heartbeat.
+
 ## Files
 
 | Path | Contents |
 | --- | --- |
 | `~/.config/pingstat/servers.list` | Server list, one per line (`#` starts a comment); edit it by hand or with `add`/`remove` |
 | `~/.config/pingstat/on_change` | Optional script for [notifications](#notifications) |
+| `~/.config/pingstat/settings` | Optional limits and heartbeat URL |
 | `~/.local/share/pingstat/<server>.db` | Results for one server (SQLite, table `ping_data`, timestamps in UTC; `status` is `ok`, `dns_error`, `net_error` or `error`) |
-| `~/.local/share/pingstat/<server>.down` | Present during a failure `on_change` has to hear about |
+| `~/.local/share/pingstat/<server>.down`, `.degraded` | Present during a failure `on_change` has to hear about |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honoured.
 
