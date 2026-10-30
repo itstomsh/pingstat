@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Fake wget for the tests: logs the call and fails like an offline machine, after
-# emptying the -O file like the real one does.
+# emptying the -O file like the real one does. Serves NET_STUB_TAGS for the GitHub
+# API if it exists.
 echo "wget $*" >> "$NET_LOG"
+case "$*" in
+    *api.github.com*)
+        [ -f "${NET_STUB_TAGS:-}" ] || exit 4
+        cat "$NET_STUB_TAGS"
+        exit 0
+        ;;
+esac
 [ "$1" = "-qO" ] && : > "$2"
 exit 4

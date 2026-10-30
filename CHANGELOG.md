@@ -6,6 +6,20 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.6.0] - 2026-10-30
+### Added
+- `-q` with `-p`: print only errors, so `cron` mails you only when something is wrong. Change your cron line to `pingstat -p -q`
+- `pingstat status`: the last result of each server, since when it has been failing, and `stale` when runs have stopped arriving
+
+### Changed
+- `--update`, `--version` and the install script now use the highest version tag instead of `main`, so a push to `main` no longer reaches users. They read the tags from the GitHub API. `bash install.sh main` still installs the development version
+- `--update` refuses a download whose version is not the expected one, and `--force-update` fails instead of reinstalling `main` when the latest version is unknown
+
+### Fixed
+- A run that found the database in use by another run failed right away. It now waits up to 10 seconds
+
+---
+
 ## [1.5.1] - 2026-10-30
 ### Changed
 - Unknown or extra arguments are now an error with exit status 1, before anything runs. Check your cron lines: one with a typo used to run and now fails

@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # Fake curl for the tests: logs the call and fails like an offline machine, or
-# serves NET_STUB_FILE if it exists, cut off after NET_STUB_LINES lines if that is set.
+# serves NET_STUB_TAGS for the GitHub API and NET_STUB_FILE for anything else, if
+# they exist; NET_STUB_FILE is cut off after NET_STUB_LINES lines if that is set.
 echo "curl $*" >> "$NET_LOG"
+case "$*" in
+    *api.github.com*)
+        [ -f "${NET_STUB_TAGS:-}" ] || exit 6
+        cat "$NET_STUB_TAGS"
+        exit 0
+        ;;
+esac
 [ -f "${NET_STUB_FILE:-}" ] || exit 6
 
 dest=""

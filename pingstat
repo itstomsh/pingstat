@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.5.1"
+VERSION="1.6.0"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -27,22 +27,24 @@ mkdir -p "$CONFIG_DIR" "$DATA_DIR"
 ###############################################################################
 # 2) Version Checking & Update
 ###############################################################################
+# The latest release is the highest version tag, so a push to main reaches nobody
 get_latest_version() {
-    local url="https://raw.githubusercontent.com/itstomsh/pingstat/main/pingstat"
-    local version_line
+    local url="https://api.github.com/repos/itstomsh/pingstat/tags?per_page=100"
+    local tags version
 
     if command -v curl >/dev/null 2>&1; then
-        version_line=$(curl -fsL --max-time 10 "$url" | grep -E '^VERSION=' || true)
+        tags=$(curl -fsL --max-time 10 "$url" || true)
     else
-        version_line=$(wget -qO- -T 10 "$url" | grep -E '^VERSION=' || true)
+        tags=$(wget -qO- -T 10 "$url" || true)
     fi
 
-    if [[ -z "$version_line" ]]; then
+    version=$(grep -oE '"name": *"[0-9]+\.[0-9]+\.[0-9]+"' <<< "$tags" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -n 1 || true)
+    if [[ -z "$version" ]]; then
         echo ""
         return 1
     fi
 
-    echo "$version_line" | cut -d= -f2 | tr -d '"'
+    echo "$version"
 }
 
 # Latest version from remote, fetched only by --version and --update
@@ -54,7 +56,7 @@ check_version() {
 
     if [ -z "$LATEST_VERSION" ]; then
         echo "WARNING: Unable to determine the latest available version."
-        echo "Check your internet connection or the remote script structure."
+        echo "Check your internet connection."
         return
     fi
 
@@ -73,9 +75,9 @@ valid_script() {
 
 update_pingstat() {
     LATEST_VERSION=$(get_latest_version || true)
-    if [ -z "$LATEST_VERSION" ] && [ "$FORCE" != true ]; then
-        echo "ERROR: Unable to determine the latest avaible version."
-        echo "Check your internet connection or the remote script content."
+    if [ -z "$LATEST_VERSION" ]; then
+        echo "ERROR: Unable to determine the latest available version."
+        echo "Check your internet connection."
         exit 1
     fi
     
@@ -94,14 +96,14 @@ update_pingstat() {
 
         TMPFILE=$(mktemp)
         trap 'rm -f "$TMPFILE"' EXIT
-        local url="https://raw.githubusercontent.com/itstomsh/pingstat/main/pingstat"
+        local url="https://raw.githubusercontent.com/itstomsh/pingstat/refs/tags/$LATEST_VERSION/pingstat"
         if command -v curl >/dev/null 2>&1; then
             curl -fsL "$url" -o "$TMPFILE" || { echo "ERROR: Download failed. Nothing was changed."; exit 1; }
         else
             wget -qO "$TMPFILE" "$url" || { echo "ERROR: Download failed. Nothing was changed."; exit 1; }
         fi
 
-        if ! valid_script "$TMPFILE"; then
+        if ! valid_script "$TMPFILE" || ! grep -qx "VERSION=\"$LATEST_VERSION\"" "$TMPFILE"; then
             echo "ERROR: Downloaded file does not appear to be a valid pingstat script. Nothing was changed."
             exit 1
         fi
@@ -177,7 +179,9 @@ Ping & Stats:
   -m [N]               Show monthly stats for last N months (default 12).
   -H [N]               Show stats per hour of day over last N days (default 7).
   -o [N]               List outages (runs without a reply) in last N days (default 30).
-  -s <server>          Specify a single server for -p, -d, -m, -H, or -o.
+  status               Show the last result of each server.
+  -s <server>          Specify a single server for -p, -d, -m, -H, -o, or status.
+  -q                   With -p: print only errors (for cron).
 
 Other Options:
   --version            Show current version.
@@ -414,9 +418,14 @@ check_server_exist() {
     done
 }
 
+# Wait for another run that is using the database instead of failing right away
+run_sql() {
+    sqlite3 -cmd ".timeout 10000" "$@"
+}
+
 init_db() {
     local dbfile="$1"
-    sqlite3 "$dbfile" <<EOF
+    run_sql "$dbfile" <<EOF
 CREATE TABLE IF NOT EXISTS ping_data (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -431,12 +440,12 @@ EOF
     # Before 1.5.0 there was no status; such rows have a NULL status and failed
     # measurements among them are indistinguishable from 100% loss
     has_status_column "$dbfile" \
-        || sqlite3 "$dbfile" "ALTER TABLE ping_data ADD COLUMN status TEXT;" 2>/dev/null \
+        || run_sql "$dbfile" "ALTER TABLE ping_data ADD COLUMN status TEXT;" 2>/dev/null \
         || has_status_column "$dbfile"   # another run may have just added it
 }
 
 has_status_column() {
-    [ "$(sqlite3 "$1" "SELECT COUNT(*) FROM pragma_table_info('ping_data') WHERE name = 'status';")" = "1" ]
+    [ "$(run_sql "$1" "SELECT COUNT(*) FROM pragma_table_info('ping_data') WHERE name = 'status';")" = "1" ]
 }
 
 # Why ping gave no statistics: dns_error and net_error mean that the network did
@@ -495,7 +504,7 @@ do_ping_one() {
         fi
     fi
 
-    sqlite3 "$dbfile" <<EOF
+    run_sql "$dbfile" <<EOF
 INSERT INTO ping_data(min, avg, max, mdev, loss, status)
 VALUES ($MIN, $AVG, $MAX, $MDEV, $LOSS, '$STATUS');
 EOF
@@ -541,8 +550,10 @@ do_ping_all() {
         if ! wait "${pids[$i]}"; then
             failed=1
             echo "ERROR: Run for ${SRV_ARR[$i]} failed." >> "$tmpdir/$i"
+            cat "$tmpdir/$i"
+        elif [ "$QUIET" != true ]; then
+            cat "$tmpdir/$i"
         fi
-        cat "$tmpdir/$i"
     done
     rm -rf "$tmpdir"
     return "$failed"
@@ -592,7 +603,7 @@ do_show_daily() {
 
     echo "----- Daily stats for '$srv' (last $limit days) -----"
     echo ""
-    sqlite3 -header -column "$dbfile" <<EOF
+    run_sql -header -column "$dbfile" <<EOF
 SELECT
     date(timestamp, 'localtime') AS day,
 $(stat_columns),
@@ -625,7 +636,7 @@ do_show_monthly() {
 
     echo "----- Monthly stats for '$srv' (last $limit months) -----"
     echo ""
-    sqlite3 -header -column "$dbfile" <<EOF
+    run_sql -header -column "$dbfile" <<EOF
 SELECT
     strftime('%Y-%m', timestamp, 'localtime') AS month,
 $(stat_columns),
@@ -649,7 +660,7 @@ do_show_hourly() {
 
     echo "----- Hourly profile for '$srv' (last $days days) -----"
     echo ""
-    sqlite3 -header -column "$dbfile" <<EOF
+    run_sql -header -column "$dbfile" <<EOF
 SELECT
     strftime('%H:00', timestamp, 'localtime') AS hour,
 $(stat_columns),
@@ -662,6 +673,105 @@ EOF
     echo "-------------------------------------------------------------------------------------------"
     echo ""
     echo "Note: Times are in milliseconds (ms), and packet loss in %."
+}
+
+# CTE with the longest normal pause between runs, as gap(secs). The usual interval
+# comes from the newest runs, not from the runs in a report's period, so the same
+# event looks the same in every period and a long pause in a short period cannot
+# become the norm.
+usual_gap() {
+    cat <<'EOF'
+sample AS (
+    SELECT timestamp FROM ping_data
+    WHERE status IS NOT 'error'
+    ORDER BY timestamp DESC LIMIT 1000
+),
+intervals AS (
+    SELECT (julianday(timestamp) - julianday(LAG(timestamp) OVER (ORDER BY timestamp))) * 86400 AS secs
+    FROM sample
+),
+-- 3 times the (lower) median interval, which is at least a minute with cron
+gap(secs) AS (
+    SELECT 3 * MAX(60, COALESCE((SELECT secs FROM intervals
+                                 WHERE secs IS NOT NULL
+                                 ORDER BY secs LIMIT 1
+                                 OFFSET (SELECT (COUNT(secs) - 1) / 2 FROM intervals)), 60))
+)
+EOF
+}
+
+# One line per server: its newest run, or 'no data'. stale means that no run came
+# when one was due: cron or the machine has stopped.
+do_show_status() {
+    if [ -n "$SINGLE_SERVER" ]; then
+        if ! check_server_exist "$SINGLE_SERVER"; then return 1; fi
+        SRV_ARR=("$SINGLE_SERVER")
+    else
+        IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
+        if [ ${#SRV_ARR[@]} -eq 0 ]; then
+            echo "No servers in config."
+            echo "Add with 'pingstat add <server>'"
+            return 1
+        fi
+    fi
+
+    local srv dbfile row last_run state since loss
+    printf '%-30s  %-19s  %-7s  %-19s  %s\n' server last_run state down_since loss
+    for srv in "${SRV_ARR[@]}"; do
+        dbfile="$(get_db_path "$srv")"
+        init_db "$dbfile"
+        row=$(run_sql "$dbfile" <<EOF
+WITH $(failure_streak),
+newest AS (
+    SELECT * FROM ping_data ORDER BY timestamp DESC, id DESC LIMIT 1
+),
+judged AS (
+    SELECT *, CASE
+        WHEN (julianday('now') - julianday(timestamp)) * 86400 > (SELECT secs FROM gap) THEN 'stale'
+        WHEN status IS 'error' THEN 'error'
+        WHEN status IS 'dns_error' THEN 'dns'
+        WHEN status IS 'net_error' THEN 'network'
+        WHEN loss >= 100 THEN 'down'
+        ELSE 'up' END AS state
+    FROM newest
+)
+SELECT datetime(timestamp, 'localtime'), state,
+       CASE WHEN state IN ('down', 'dns', 'network') THEN datetime((SELECT at FROM streak), 'localtime') ELSE '-' END,
+       CASE WHEN loss IS NULL THEN '-' ELSE printf('%.0f%%', loss) END
+FROM judged;
+EOF
+)
+        if [ -z "$row" ]; then
+            printf '%-30s  %-19s  %-7s  %-19s  %s\n' "$srv" - "no data" - -
+        else
+            IFS='|' read -r last_run state since loss <<< "$row"
+            printf '%-30s  %-19s  %-7s  %-19s  %s\n' "$srv" "$last_run" "$state" "$since" "$loss"
+        fi
+    done
+}
+
+# CTEs for the failure a server is in now: gap as in usual_gap, failing(timestamp)
+# with the runs since the last reply and streak(at) with the first of them after
+# the last monitoring gap
+failure_streak() {
+    usual_gap
+    cat <<'EOF'
+,
+last_reply(at) AS (
+    SELECT COALESCE((SELECT timestamp FROM ping_data WHERE loss < 100
+                     ORDER BY timestamp DESC LIMIT 1), '')
+),
+failing AS (
+    SELECT timestamp,
+           (julianday(timestamp) - julianday(LAG(timestamp) OVER (ORDER BY timestamp, id))) * 86400 AS since_prev
+    FROM ping_data
+    WHERE status IS NOT 'error' AND timestamp > (SELECT at FROM last_reply)
+),
+streak(at) AS (
+    SELECT MAX(timestamp) FROM failing
+    WHERE since_prev IS NULL OR since_prev > (SELECT secs FROM gap)
+)
+EOF
 }
 
 # An outage is a series of consecutive runs without a reply: 100% loss, or a DNS
@@ -679,7 +789,7 @@ do_show_outages() {
     echo "----- Outages for '$srv' (last $days days) -----"
     echo ""
     local result
-    result=$(sqlite3 -header -column "$dbfile" <<EOF
+    result=$(run_sql -header -column "$dbfile" <<EOF
 WITH cutoff(at) AS (
     SELECT datetime('now', '-$days days')
 ),
@@ -701,25 +811,7 @@ steps AS (
     FROM runs
     WINDOW w AS (ORDER BY timestamp, id)
 ),
--- The usual interval comes from the newest runs, not from the runs in the window,
--- so the same event looks the same in every window and a long pause in a short
--- window cannot become the norm
-sample AS (
-    SELECT timestamp FROM ping_data
-    WHERE status IS NOT 'error'
-    ORDER BY timestamp DESC LIMIT 1000
-),
-intervals AS (
-    SELECT (julianday(timestamp) - julianday(LAG(timestamp) OVER (ORDER BY timestamp))) * 86400 AS secs
-    FROM sample
-),
--- 3 times the (lower) median interval, which is at least a minute with cron
-gap(secs) AS (
-    SELECT 3 * MAX(60, COALESCE((SELECT secs FROM intervals
-                                 WHERE secs IS NOT NULL
-                                 ORDER BY secs LIMIT 1
-                                 OFFSET (SELECT (COUNT(secs) - 1) / 2 FROM intervals)), 60))
-),
+$(usual_gap),
 grouped AS (
     SELECT *, SUM(down AND (prev_down IS NOT 1 OR secs_since_prev > (SELECT secs FROM gap)))
               OVER (ORDER BY timestamp, id) AS grp
@@ -789,6 +881,7 @@ server_in_list() {
 ###############################################################################
 read_config
 SINGLE_SERVER=""
+QUIET=false
 
 # If no arguments, show usage
 [ $# -eq 0 ] && usage && exit 0
@@ -850,6 +943,10 @@ case "$1" in
         ACTION="ping"
         shift
         ;;
+    status)
+        ACTION="status"
+        shift
+        ;;
     -d)
         ACTION="daily"
         if [[ "${2:-}" =~ ^[0-9]+$ ]]; then
@@ -905,6 +1002,11 @@ while [ $# -gt 0 ]; do
             SINGLE_SERVER="$2"
             shift 2
             ;;
+        -q)
+            [ "$ACTION" = "ping" ] || reject_argument "$1"
+            QUIET=true
+            shift
+            ;;
         *)
             reject_argument "$1"
             ;;
@@ -915,6 +1017,9 @@ done
 case "$ACTION" in
     "ping")
         do_ping_all
+        ;;
+    "status")
+        do_show_status
         ;;
     "daily")
         show_stats daily "$DAILY_LIMIT"

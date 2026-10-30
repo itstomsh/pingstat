@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/itstomsh/pingstat/main/install -o i
 bash install.sh && rm install.sh   # or: sudo bash install.sh, for all users
 
 pingstat add kernel.org
-crontab -e                         # add: * * * * * pingstat -p
+crontab -e                         # add: * * * * * pingstat -p -q
 pingstat -d                        # a few days later
 ```
 
@@ -58,8 +58,9 @@ rm install.sh
 
 With `wget`, download it with `wget -q https://raw.githubusercontent.com/itstomsh/pingstat/main/install -O install.sh`.
 
-To install a specific version, pass it to the script: `bash install.sh 1.5.1`. Versions are listed in
-the [CHANGELOG](CHANGELOG.md).
+The script installs the latest release, which is the highest version tag. To install a specific
+version, pass it to the script: `bash install.sh 1.6.0`, or `bash install.sh main` for the unreleased
+development version. Versions are listed in the [CHANGELOG](CHANGELOG.md).
 
 > **Installed 1.1.0 or older?** Those versions look for updates on Codeberg, where pingstat is no
 > longer published. Run the install script above once; your servers and data are kept.
@@ -72,11 +73,13 @@ the [CHANGELOG](CHANGELOG.md).
 | `pingstat remove <server>` | Remove a server from the list (its data is kept) |
 | `pingstat list` | List servers and their database files |
 | `pingstat -p` | Ping all servers once (4 pings each, in parallel) and store the results |
+| `pingstat -p -q` | The same, printing only errors: this is the one for cron |
+| `pingstat status` | The last result of each server, and whether runs are still arriving |
 | `pingstat -d [N]` | Daily stats for the last `N` calendar days, today included (default 20) |
 | `pingstat -m [N]` | Monthly stats for the last `N` calendar months, this one included (default 12) |
 | `pingstat -H [N]` | Stats per hour of day over the last `N` days (default 7) |
 | `pingstat -o [N]` | Outages in the last `N` days (default 30) |
-| `-s <server>` | Limit `-p`, `-d`, `-m`, `-H` or `-o` to one server |
+| `-s <server>` | Limit `-p`, `-d`, `-m`, `-H`, `-o` or `status` to one server |
 | `--version`, `--update`, `--force-update` | Show the version, update to the latest one, reinstall it |
 | `--uninstall` | Remove pingstat **and all its data** for your user (asks first) |
 
@@ -88,6 +91,30 @@ pingstat -o                # when the connection was down in the last 30 days
 
 Server names must be host names or IP addresses (letters, digits, `.`, `-`, `:`; not starting with
 `-` or `.`).
+
+### Status
+
+`pingstat status` shows at a glance whether everything is working:
+
+```
+$ pingstat status
+server                          last_run             state    down_since           loss
+kernel.org                      2025-03-09 14:32:01  up       -                    0%
+192.168.1.1                     2025-03-09 14:32:01  down     2025-03-09 14:20:01  100%
+gnu.org                         2025-03-09 14:32:01  dns      2025-03-09 14:30:01  -
+old.example.org                 2025-03-02 09:15:01  stale    -                    0%
+```
+
+| `state` | Meaning |
+| --- | --- |
+| `up` | The last run got a reply |
+| `down` | The last run got no reply |
+| `dns` / `network` | The last run failed on a DNS or network error |
+| `error` | The last run could not measure anything (see `ERROR` under Troubleshooting) |
+| `stale` | No run came when one was due: `cron` or the machine has stopped |
+| `no data` | No runs yet |
+
+`down_since` is the first failed run after the last reply and any monitoring gap (see below).
 
 ### Outages
 
@@ -147,7 +174,7 @@ reply. Runs from before 1.5.0 have no `status`; DNS errors among them stay store
 Ping all servers every minute (`crontab -e`):
 
 ```cron
-* * * * * pingstat -p
+* * * * * pingstat -p -q
 ```
 
 Every minute is the recommended interval and the shortest cron allows. It catches outages of a minute
@@ -157,8 +184,12 @@ parallel). Each server's database grows by about 1440 rows a day, roughly 30 MB 
 A server can also have its own, less frequent schedule:
 
 ```cron
-*/5 * * * * pingstat -p -s kernel.org
+*/5 * * * * pingstat -p -q -s kernel.org
 ```
+
+`cron` mails whatever a job prints, and ignores the exit status. Plain `-p` prints a line per server,
+so it would send a mail every minute. With `-q` a mail means something is wrong: set `MAILTO` in your
+crontab and do not redirect the output to `/dev/null`, or you will not hear about errors.
 
 `pingstat -p` exits with status 1 if a result could not be stored or `ping` printed something it does
 not recognise. The other servers are still pinged. A server that does not answer or does not resolve
@@ -182,7 +213,7 @@ Both honour `XDG_CONFIG_HOME` and `XDG_DATA_HOME`.
 ## Updating and uninstalling
 
 ```bash
-pingstat --update      # uses sudo itself if pingstat is installed in /usr/bin
+pingstat --update      # the latest release; uses sudo itself if installed in /usr/bin
 pingstat --uninstall   # asks, then removes the script, your config and all your data
 ```
 
@@ -219,6 +250,9 @@ Tests use [bats](https://github.com/bats-core/bats-core) with a fake `ping` in `
 shellcheck pingstat install tests/bin/* tests/*.bats
 bats tests
 ```
+
+A push to `main` reaches nobody: installs and updates use the highest version tag. To release, set
+`VERSION` in `pingstat`, add a CHANGELOG entry, push, and tag once CI has passed.
 
 ## License
 

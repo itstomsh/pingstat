@@ -99,8 +99,29 @@ if [ ! -w "$BIN_DIR" ]; then
     exit 1
 fi
 
-# Allow user to install a specific version
-VERSION="${1:-main}"
+# The latest release is the highest version tag
+latest_version() {
+    local url="https://api.github.com/repos/itstomsh/pingstat/tags?per_page=100"
+    local tags
+
+    if command -v curl >/dev/null 2>&1; then
+        tags=$(curl -fsL --max-time 10 "$url" || true)
+    else
+        tags=$(wget -qO- -T 10 "$url" || true)
+    fi
+    grep -oE '"name": *"[0-9]+\.[0-9]+\.[0-9]+"' <<< "$tags" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -n 1 || true
+}
+
+# Allow user to install a specific version, or "main" for the development version
+VERSION="${1:-}"
+if [ -z "$VERSION" ]; then
+    VERSION=$(latest_version)
+    if [ -z "$VERSION" ]; then
+        echo "Error: Unable to determine the latest version. Check your internet connection,"
+        echo "or pass a version: bash install.sh 1.6.0"
+        exit 1
+    fi
+fi
 if [ "$VERSION" == "main" ]; then
     BASE_URL="https://raw.githubusercontent.com/itstomsh/pingstat/main"
 else

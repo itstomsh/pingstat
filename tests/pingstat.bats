@@ -8,6 +8,7 @@ setup() {
     export PATH="$BATS_TEST_DIRNAME/bin:$PATH"
     export NET_LOG="$BATS_TEST_TMPDIR/net.log"
     export NET_STUB_FILE="$BATS_TEST_TMPDIR/served"
+    export NET_STUB_TAGS="$BATS_TEST_TMPDIR/tags"
     export TZ="Europe/Zagreb"
     PINGSTAT="$BATS_TEST_DIRNAME/../pingstat"
     DATA="$XDG_DATA_HOME/pingstat"
@@ -37,8 +38,17 @@ run_at() {
     query "$1" "INSERT INTO ping_data(timestamp, avg, loss, status) VALUES (datetime('now', '-$2 minutes'), 1, $3, NULLIF('${4:-}', ''));"
 }
 
+# release_tags <tag>...: the tags GitHub reports, in its own order
+release_tags() {
+    local tag
+    for tag in "$@"; do
+        printf '  {\n    "name": "%s",\n    "commit": {}\n  },\n' "$tag"
+    done > "$NET_STUB_TAGS"
+}
+
 # An installed pingstat for the --update and install tests
 installed() {
+    release_tags 9.9.9 1.0.0
     INSTALLED="$HOME/bin/pingstat"
     mkdir -p "$HOME/bin"
     echo '#!/usr/bin/env bash' > "$INSTALLED"
@@ -52,7 +62,7 @@ path_without_curl() {
     local dir="$BATS_TEST_TMPDIR/nocurl" tool
     mkdir -p "$dir"
     cp "$BATS_TEST_DIRNAME/bin/ping" "$BATS_TEST_DIRNAME/bin/wget" "$dir"
-    for tool in bash env sqlite3 awk realpath dirname basename mktemp rm chmod mv grep head; do
+    for tool in bash env sqlite3 awk realpath dirname basename mktemp rm chmod mv grep head sort tail; do
         ln -s "$(command -v "$tool")" "$dir/$tool"
     done
     echo "$dir"
@@ -306,11 +316,101 @@ path_without_curl() {
     [ ! -e "$NET_LOG" ]
 }
 
+@test "-p -q prints nothing unless something fails" {
+    servers ok.test down.test nodns.test
+    run "$PINGSTAT" -p -q
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ "$(query ok.test 'SELECT COUNT(*) FROM ping_data;')" = "1" ]
+
+    servers ok.test weird.test
+    run "$PINGSTAT" -p -q
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ERROR: Could not measure weird.test"* ]]
+    [[ "$output" != *"Pinged ok.test"* ]]
+}
+
+@test "-p -q shows why a result could not be stored" {
+    servers ok.test
+    mkdir -p "$DATA"
+    echo "this is not a database, and long enough for sqlite to notice that it is not" > "$DATA/ok.test.db"
+    run "$PINGSTAT" -p -q
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not a database"* ]]
+    [[ "$output" == *"ERROR: Run for ok.test failed."* ]]
+}
+
+@test "-q only works with -p" {
+    servers ok.test
+    run "$PINGSTAT" -d -q
+    [ "$status" -eq 1 ]
+    [[ "$output" == "Unknown argument '-q'."* ]]
+}
+
+@test "-p waits for another run that holds the database" {
+    servers ok.test
+    "$PINGSTAT" -p
+    { echo "BEGIN EXCLUSIVE;"; sleep 2; echo "COMMIT;"; } | sqlite3 "$DATA/ok.test.db" &
+    sleep 0.5
+    run "$PINGSTAT" -p
+    wait
+    [ "$status" -eq 0 ]
+    [ "$(query ok.test 'SELECT COUNT(*) FROM ping_data;')" = "2" ]
+}
+
 @test "--version warns instead of reporting a new version when offline" {
     run "$PINGSTAT" --version
     [[ "$output" == *"Current version:"* ]]
     [[ "$output" == *"Unable to determine the latest available version"* ]]
     [[ "$output" != *"New version available"* ]]
+}
+
+@test "--version reports the highest release tag" {
+    # 50.10.0 is higher than 50.9.0, and other tag names are not releases
+    release_tags 50.9.0 99.0.0-beta 50.10.0 v99.0.0
+    run "$PINGSTAT" --version
+    [[ "$output" == *"New version available: 50.10.0"* ]]
+}
+
+# --- Status ---
+
+@test "status shows the last result of each server" {
+    servers ok.test down.test nodns.test noroute.test weird.test new.test
+    run "$PINGSTAT" -p
+    run "$PINGSTAT" status
+    [ "$status" -eq 0 ]
+    [[ "${lines[0]}" =~ ^server\ +last_run\ +state\ +down_since\ +loss$ ]]
+    [[ "$output" =~ ok\.test\ +[0-9-]+\ [0-9:]+\ +up\ +-\ +25% ]]
+    [[ "$output" =~ down\.test\ +[0-9-]+\ [0-9:]+\ +down\ +[0-9-]+\ [0-9:]+\ +100% ]]
+    [[ "$output" =~ nodns\.test\ +[0-9-]+\ [0-9:]+\ +dns\ +[0-9-]+\ [0-9:]+\ +- ]]
+    [[ "$output" =~ noroute\.test\ +[0-9-]+\ [0-9:]+\ +network\ +[0-9-]+\ [0-9:]+\ +- ]]
+    [[ "$output" =~ weird\.test\ +[0-9-]+\ [0-9:]+\ +error\ +-\ +- ]]
+
+    query new.test "DELETE FROM ping_data;"
+    run "$PINGSTAT" status -s new.test
+    [ "${#lines[@]}" -eq 2 ]
+    [[ "${lines[1]}" =~ new\.test\ +-\ +no\ data ]]
+}
+
+@test "status shows when the current failure began, after any monitoring gap" {
+    new_db ok.test
+    local m
+    for m in 5040 5030 5020; do run_at ok.test "$m" 0; done
+    run_at ok.test 5010 100     # before the gap: not part of the current failure
+    run_at ok.test 20 100
+    run_at ok.test 10 100
+    run_at ok.test 5 NULL error  # measured nothing: still failing, not recovered
+    run_at ok.test 0 100
+    run "$PINGSTAT" status
+    [[ "${lines[1]}" =~ down\ +$(date -d '-20 minutes' '+%Y-%m-%d %H:%M') ]]
+}
+
+@test "status shows stale when runs have stopped" {
+    new_db ok.test
+    local m
+    for m in 130 120 110 100; do run_at ok.test "$m" 100; done
+    run "$PINGSTAT" status
+    [[ "${lines[1]}" =~ stale\ +-\ +100% ]]
 }
 
 # --- Stats ---
@@ -537,6 +637,30 @@ path_without_curl() {
 
 # --- Installing and updating ---
 
+@test "install takes the highest release tag, an explicit version or main" {
+    installed
+    cp "$PINGSTAT" "$NET_STUB_FILE"
+    release_tags 1.9.0 1.10.0
+    PATH="$HOME/bin:$PATH" run bash "$BATS_TEST_DIRNAME/../install" < /dev/null
+    [ "$status" -eq 0 ]
+    grep -q "refs/tags/1.10.0/pingstat" "$NET_LOG"
+
+    PATH="$HOME/bin:$PATH" run bash "$BATS_TEST_DIRNAME/../install" 1.4.1 < /dev/null
+    grep -q "refs/tags/1.4.1/pingstat" "$NET_LOG"
+
+    PATH="$HOME/bin:$PATH" run bash "$BATS_TEST_DIRNAME/../install" main < /dev/null
+    grep -q "pingstat/main/pingstat" "$NET_LOG"
+}
+
+@test "install stops when it cannot find the latest version" {
+    installed
+    rm "$NET_STUB_TAGS"
+    PATH="$HOME/bin:$PATH" run bash "$BATS_TEST_DIRNAME/../install" < /dev/null
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to determine the latest version"* ]]
+    [ "$(cat "$INSTALLED")" = "$OLD_CONTENT" ]
+}
+
 @test "install replaces the script with the download" {
     installed
     cp "$PINGSTAT" "$NET_STUB_FILE"
@@ -583,6 +707,9 @@ path_without_curl() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"Update complete! Running version: 9.9.9"* ]]
     cmp "$NET_STUB_FILE" "$INSTALLED"
+    grep -q "refs/tags/9.9.9/pingstat" "$NET_LOG"
+    run grep "pingstat/main" "$NET_LOG"
+    [ "$status" -eq 1 ]
     [ -x "$INSTALLED" ]
     [ "$(ls -A "$HOME/bin")" = "pingstat" ]
 }
@@ -606,4 +733,25 @@ path_without_curl() {
     [[ "$output" == *"not appear to be a valid pingstat script"* ]]
     [ "$(cat "$INSTALLED")" = "$before" ]
     [ "$(ls -A "$HOME/bin")" = "pingstat" ]
+}
+
+@test "--update refuses a download of another version" {
+    installed
+    cp "$PINGSTAT" "$INSTALLED"
+    local before
+    before=$(cat "$INSTALLED")
+    sed 's/^VERSION=.*/VERSION="8.8.8"/' "$PINGSTAT" > "$NET_STUB_FILE"
+    run "$INSTALLED" --update
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not appear to be a valid pingstat script"* ]]
+    [ "$(cat "$INSTALLED")" = "$before" ]
+}
+
+@test "--force-update fails when the latest version is unknown" {
+    installed
+    cp "$PINGSTAT" "$INSTALLED"
+    rm "$NET_STUB_TAGS"
+    run "$INSTALLED" --force-update
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Unable to determine the latest available version"* ]]
 }
