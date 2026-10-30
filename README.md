@@ -181,7 +181,7 @@ Ping all servers every minute (`crontab -e`):
 
 Every minute is the recommended interval and the shortest cron allows. It catches outages of a minute
 or two and dates them to the minute, while a run takes only about 3 seconds (4 pings, all servers in
-parallel). Each server's database grows by about 1440 rows a day, roughly 30 MB a year.
+parallel). Each server's database grows by about 1440 rows a day, roughly 45 MB a year.
 
 A server can also have its own, less frequent schedule:
 
@@ -290,7 +290,7 @@ Remove the `pingstat` line from your crontab as well.
 
 ## Old data
 
-With a run every minute a database grows by about 30 MB a year. `pingstat list` shows how big each one
+With a run every minute a database grows by about 45 MB a year. `pingstat list` shows how big each one
 is, and `list` and `status` warn when one passes 100 MB. Change that limit in
 `~/.config/pingstat/settings`, or turn the warning off with 0:
 
