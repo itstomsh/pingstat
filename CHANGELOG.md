@@ -6,6 +6,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.10.0] - 2026-10-30
+### Added
+- `remove` asks whether to delete the server's data too, showing its size and age. `--purge` deletes without asking, also for a server that already left the list. Without a terminal and without `--purge` the data is kept, as before
+
+### Changed
+- `remove` rejects names that are not host names or IP addresses
+
+---
+
 ## [1.9.1] - 2026-10-30
 ### Fixed
 - A run that read the server list while `add` or `remove` was writing it could find it empty. The list is now replaced in one step

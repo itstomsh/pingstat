@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.9.1"
+VERSION="1.10.0"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -176,7 +176,8 @@ Usage: pingstat [command] [options]
 
 Server Management:
   add <server>         Add a server to the config list.
-  remove <server>      Remove a server from the config list.
+  remove <server>      Remove a server from the config list; asks whether to
+                       delete its data too (--purge: delete without asking).
   list                 List all servers with the size of their database.
   prune --older-than N Delete runs older than N days and shrink the database
                        (all servers or one with -s; asks first, --yes to skip).
@@ -403,6 +404,15 @@ add_server() {
 
 remove_server() {
     local srv="$1"
+    local purge="$2"
+    local dbfile answer
+    dbfile="$(get_db_path "$srv")"
+    # The name becomes a file name below, and old lists may hold anything
+    if ! valid_server_name "$srv"; then
+        echo "Invalid server name '$srv'. Use a host name or IP address."
+        return 1
+    fi
+
     lock_config
     IFS=' ' read -ra SRV_ARR <<< "$SERVERS"
     local NEW_ARR=()
@@ -423,10 +433,46 @@ remove_server() {
         echo "Server '$srv' not found."
     fi
     unlock_config
+
+    [ -f "$dbfile" ] || return 0
+    if [ "$purge" = true ]; then
+        purge_server "$srv"
+    elif [ -t 0 ]; then
+        read -r -p "Also delete its data ($(human_size "$(file_size "$dbfile")"), since $(db_since "$dbfile"))? [y/N] " answer || answer=""
+        case "$answer" in
+            [Yy]*) purge_server "$srv" ;;
+            *) echo "Data kept in $dbfile" ;;
+        esac
+    else
+        echo "Data kept in $dbfile"
+    fi
+}
+
+# Delete what pingstat stores for a server, after any run for it has finished
+purge_server() {
+    local srv="$1"
+    local dbfile
+    dbfile="$(get_db_path "$srv")"
+    (
+        if command -v flock >/dev/null 2>&1; then
+            exec 9>"$DATA_DIR/$srv.lock"
+            flock 9
+        fi
+        rm -f "$dbfile" "$dbfile-journal" "$DATA_DIR/$srv.down" "$DATA_DIR/$srv.degraded"
+    )
+    rm -f "$DATA_DIR/$srv.lock"
+    echo "Deleted the data of '$srv'."
 }
 
 file_size() {
     echo $(($(wc -c < "$1")))
+}
+
+# Date of the oldest run, or - if there is none or the database cannot be read
+db_since() {
+    local since
+    since=$(run_sql "$1" "SELECT date(MIN(timestamp), 'localtime') FROM ping_data;" 2>/dev/null || true)
+    echo "${since:--}"
 }
 
 human_size() {
@@ -467,12 +513,12 @@ list_servers() {
     for s in ${SRV_ARR[@]+"${SRV_ARR[@]}"}; do
         dbfile="$(get_db_path "$s")"
         size="-"
-        since=""
+        since="-"
         if [ -f "$dbfile" ]; then
             size=$(human_size "$(file_size "$dbfile")")
-            since=$(run_sql "$dbfile" "SELECT date(MIN(timestamp), 'localtime') FROM ping_data;" 2>/dev/null || true)
+            since=$(db_since "$dbfile")
         fi
-        printf '%-30s  %-8s  %-10s  %s\n' "$s" "$size" "${since:--}" "$dbfile"
+        printf '%-30s  %-8s  %-10s  %s\n' "$s" "$size" "$since" "$dbfile"
     done
     warn_big_databases "${SRV_ARR[@]}"
 }
@@ -1195,7 +1241,7 @@ case "$1" in
     --version|--update|--force-update|--uninstall|-h|--help|list)
         [ $# -le 1 ] || reject_argument "$2"
         ;;
-    add|remove)
+    add)
         [ $# -le 2 ] || reject_argument "$3"
         ;;
 esac
@@ -1227,11 +1273,23 @@ case "$1" in
         exit 0
         ;;
     remove)
-        if [ -z "${2:-}" ]; then
-            echo "Usage: pingstat remove <server>"
+        shift
+        REMOVE_SERVER=""
+        PURGE=false
+        for arg in "$@"; do
+            if [ "$arg" = "--purge" ]; then
+                PURGE=true
+            elif [ -z "$REMOVE_SERVER" ]; then
+                REMOVE_SERVER="$arg"
+            else
+                reject_argument "$arg"
+            fi
+        done
+        if [ -z "$REMOVE_SERVER" ]; then
+            echo "Usage: pingstat remove <server> [--purge]"
             exit 1
         fi
-        remove_server "$2"
+        remove_server "$REMOVE_SERVER" "$PURGE"
         exit 0
         ;;
     list)

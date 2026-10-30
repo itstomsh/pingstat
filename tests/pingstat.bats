@@ -735,6 +735,103 @@ settings() {
     [ ! -e "$NET_LOG" ]
 }
 
+# --- Removing data ---
+
+@test "remove --purge deletes everything of that server and nothing else" {
+    servers ok.test ok.test2
+    "$PINGSTAT" -p
+    touch "$DATA/ok.test.down" "$DATA/ok.test.degraded" "$DATA/ok.test.db-journal"
+
+    run "$PINGSTAT" remove ok.test --purge
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Removed server 'ok.test'."* ]]
+    [[ "$output" == *"Deleted the data of 'ok.test'."* ]]
+    [ -z "$(find "$DATA" -name 'ok.test.*')" ]
+    [ -e "$DATA/ok.test2.db" ]
+    [ "$(grep -v '^#' "$XDG_CONFIG_HOME/pingstat/servers.list")" = "ok.test2" ]
+
+    run "$PINGSTAT" remove --purge ok.test2
+    [ "$status" -eq 0 ]
+    [ ! -e "$DATA/ok.test2.db" ]
+}
+
+@test "remove without a terminal keeps the data and says where" {
+    servers ok.test
+    "$PINGSTAT" -p
+    run "$PINGSTAT" remove ok.test < /dev/null
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Data kept in $DATA/ok.test.db"* ]]
+    [ -e "$DATA/ok.test.db" ]
+}
+
+@test "remove asks in a terminal, and deletes only on yes" {
+    [ "$(uname)" = "Linux" ] && command -v script >/dev/null || skip "needs util-linux script"
+    local answer
+    for answer in "" n; do
+        servers ok.test
+        "$PINGSTAT" -p
+        run script -qec "'$PINGSTAT' remove ok.test" /dev/null <<< "$answer"
+        [[ "$output" == *"Also delete its data ("*" KB, since "*")? [y/N]"* ]]
+        [[ "$output" == *"Data kept in"* ]]
+        [ -e "$DATA/ok.test.db" ]
+    done
+
+    servers ok.test
+    run script -qec "'$PINGSTAT' remove ok.test" /dev/null <<< "y"
+    [[ "$output" == *"Deleted the data of 'ok.test'."* ]]
+    [ ! -e "$DATA/ok.test.db" ]
+}
+
+@test "remove --purge cleans up a server that left the list earlier" {
+    servers ok.test
+    "$PINGSTAT" -p
+    servers other.test
+    run "$PINGSTAT" remove ok.test --purge
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Server 'ok.test' not found."* ]]
+    [[ "$output" == *"Deleted the data of 'ok.test'."* ]]
+    [ ! -e "$DATA/ok.test.db" ]
+    [ "$(grep -v '^#' "$XDG_CONFIG_HOME/pingstat/servers.list")" = "other.test" ]
+}
+
+@test "remove --purge of an unknown server deletes nothing and says so" {
+    run "$PINGSTAT" remove nothing.test --purge
+    [ "$status" -eq 0 ]
+    [ "$output" = "Server 'nothing.test' not found." ]
+}
+
+@test "remove refuses names that could leave the data directory" {
+    mkdir -p "$DATA"
+    touch "$DATA/../evil.db" "$DATA/../evil.down"
+    local name
+    for name in ../evil ../../evil a/b; do
+        run "$PINGSTAT" remove "$name" --purge
+        [ "$status" -eq 1 ]
+        [[ "$output" == "Invalid server name '$name'."* ]]
+    done
+    [ -e "$DATA/../evil.db" ] && [ -e "$DATA/../evil.down" ]
+}
+
+@test "remove --purge waits for a run of that server" {
+    command -v flock >/dev/null || skip "flock not installed"
+    servers ok.test
+    "$PINGSTAT" -p
+    PING_STUB_SLEEP=2 "$PINGSTAT" -p > /dev/null &
+    sleep 1
+    "$PINGSTAT" remove ok.test --purge
+    wait
+    [ ! -e "$DATA/ok.test.db" ]
+}
+
+@test "remove without a server prints usage, and takes only one" {
+    run "$PINGSTAT" remove --purge
+    [ "$status" -eq 1 ]
+    [ "$output" = "Usage: pingstat remove <server> [--purge]" ]
+    run "$PINGSTAT" remove a.test b.test --purge
+    [ "$status" -eq 1 ]
+    [[ "$output" == "Unknown argument 'b.test'."* ]]
+}
+
 # --- Database size and pruning ---
 
 # run_days_ago <server> <days>...

@@ -71,7 +71,7 @@ development version. Versions are listed in the [CHANGELOG](CHANGELOG.md).
 | Command | What it does |
 | --- | --- |
 | `pingstat add <server>` | Add a server (asks what to do if it does not answer a test ping) |
-| `pingstat remove <server>` | Remove a server from the list (its data is kept) |
+| `pingstat remove <server> [--purge]` | Remove a server from the list; asks whether to delete its data too ([details](#old-data)) |
 | `pingstat list` | List servers, the size and age of their databases, and warn about big ones |
 | `pingstat prune --older-than N` | Delete runs older than `N` days and shrink the databases ([details](#old-data)) |
 | `pingstat -p` | Ping all servers once (4 pings each, in parallel) and store the results |
@@ -307,6 +307,10 @@ pingstat prune --older-than 365                # all servers; shows how much and
 pingstat prune --older-than 365 -s kernel.org  # one server, also one you removed from the list
 pingstat prune --older-than 365 --yes          # without asking, as cron needs
 ```
+
+To delete everything of a server, `pingstat remove <server>` asks after removing it, and the answer
+defaults to no. `--purge` deletes without asking, also for a server that already left the list.
+Without a terminal and without `--purge`, the data stays where it is.
 
 Deleted runs are gone for good, also from `-d`, `-m`, `-H` and `-o`. Shrinking the file needs free disk
 space of about its size for a moment. While it runs, `-p` skips that server (needs `flock`).
