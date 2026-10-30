@@ -201,14 +201,38 @@ If a run is still pinging a server when the next one starts, the next run skips 
 Without a terminal, as in cron, `pingstat` never asks anything: `-s` with a server that is not in
 the list fails with a message instead of adding it, so a typo in a cron line cannot add a server.
 
+## Notifications
+
+`pingstat` can tell you when a server goes down and when it comes back. Put an executable script at
+`~/.config/pingstat/on_change`. `pingstat -p` calls it with four arguments:
+
+| Argument | Value |
+| --- | --- |
+| 1 | `down` or `up` |
+| 2 | The server |
+| 3 | `no reply`, `dns` or `network` |
+| 4 | Local time of the first failed run |
+
+```bash
+#!/bin/sh
+echo "$2 is $1 ($3), failing since $4" | mail -s "pingstat: $2 is $1" you@example.org
+```
+
+`down` comes after 3 failed runs in a row, so a single lost run stays quiet, and only once per
+failure. `up` comes on the first reply after that. Runs that measured nothing and failures from
+before a monitoring gap do not count. The script can run for 30 seconds if `timeout` is installed. If
+it fails, `-p` reports an error and exits with status 1, and the next run tries again.
+
 ## Files
 
 | Path | Contents |
 | --- | --- |
 | `~/.config/pingstat/servers.list` | Server list, one per line (`#` starts a comment); edit it by hand or with `add`/`remove` |
+| `~/.config/pingstat/on_change` | Optional script for [notifications](#notifications) |
 | `~/.local/share/pingstat/<server>.db` | Results for one server (SQLite, table `ping_data`, timestamps in UTC; `status` is `ok`, `dns_error`, `net_error` or `error`) |
+| `~/.local/share/pingstat/<server>.down` | Present while `on_change` knows the server is down |
 
-Both honour `XDG_CONFIG_HOME` and `XDG_DATA_HOME`.
+`XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honoured.
 
 ## Updating and uninstalling
 

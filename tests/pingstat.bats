@@ -413,6 +413,111 @@ path_without_curl() {
     [[ "${lines[1]}" =~ stale\ +-\ +100% ]]
 }
 
+# --- on_change hook ---
+
+# A hook that logs its arguments, and fails while $BATS_TEST_TMPDIR/hook-fails exists
+hook() {
+    HOOK_LOG="$BATS_TEST_TMPDIR/hook.log"
+    cat > "$XDG_CONFIG_HOME/pingstat/on_change" <<EOF
+#!/usr/bin/env bash
+[ ! -e "$BATS_TEST_TMPDIR/hook-fails" ] || exit 1
+printf '%s|' "\$@" >> "$HOOK_LOG"
+echo >> "$HOOK_LOG"
+EOF
+    chmod +x "$XDG_CONFIG_HOME/pingstat/on_change"
+}
+
+@test "on_change hears of a failure after 3 failed runs, once, and of the recovery" {
+    hook
+    new_db ok.test
+    run_at ok.test 30 0
+    local since
+
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    [ ! -e "$HOOK_LOG" ]
+
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    [ "$(wc -l < "$HOOK_LOG")" -eq 1 ]
+    since=$(query ok.test "SELECT datetime(MIN(timestamp), 'localtime') FROM ping_data WHERE loss >= 100;")
+    [ "$(cat "$HOOK_LOG")" = "down|ok.test|no reply|$since|" ]
+
+    "$PINGSTAT" -p
+    [ "$(wc -l < "$HOOK_LOG")" -eq 2 ]
+    [ "$(tail -n 1 "$HOOK_LOG")" = "up|ok.test|no reply|$since|" ]
+    [ ! -e "$DATA/ok.test.down" ]
+
+    "$PINGSTAT" -p
+    [ "$(wc -l < "$HOOK_LOG")" -eq 2 ]
+}
+
+@test "on_change stays silent for a short failure" {
+    hook
+    new_db ok.test
+    run_at ok.test 30 0
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    [ ! -e "$HOOK_LOG" ]
+}
+
+@test "on_change names DNS and network errors" {
+    hook
+    servers nodns.test noroute.test
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    [[ "$(cat "$HOOK_LOG")" == *"down|nodns.test|dns|"* ]]
+    [[ "$(cat "$HOOK_LOG")" == *"down|noroute.test|network|"* ]]
+}
+
+@test "on_change does not count failures from before a monitoring gap" {
+    hook
+    new_db ok.test
+    local m
+    for m in 5040 5030 5020; do run_at ok.test "$m" 0; done
+    run_at ok.test 5010 100
+    run_at ok.test 5000 100
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    [ ! -e "$HOOK_LOG" ]
+}
+
+@test "on_change is not called for a failed measurement" {
+    hook
+    servers weird.test
+    run "$PINGSTAT" -p
+    run "$PINGSTAT" -p
+    run "$PINGSTAT" -p
+    [ ! -e "$HOOK_LOG" ]
+}
+
+@test "a failing on_change is an error and is tried again" {
+    hook
+    new_db ok.test
+    run_at ok.test 30 0
+    touch "$BATS_TEST_TMPDIR/hook-fails"
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    PING_STUB_DOWN=1 run "$PINGSTAT" -p -q
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ERROR: The on_change hook failed for ok.test."* ]]
+    [ "$(query ok.test 'SELECT COUNT(*) FROM ping_data;')" = "4" ]
+
+    rm "$BATS_TEST_TMPDIR/hook-fails"
+    PING_STUB_DOWN=1 run "$PINGSTAT" -p -q
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$HOOK_LOG")" -eq 1 ]
+}
+
+@test "without on_change, -p makes no state files" {
+    servers down.test
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    "$PINGSTAT" -p
+    [ ! -e "$DATA/down.test.down" ]
+}
+
 # --- Stats ---
 
 @test "-d groups by local day and shows jitter" {

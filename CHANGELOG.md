@@ -6,6 +6,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.7.0] - 2026-10-30
+### Added
+- Notifications: `-p` calls the executable `~/.config/pingstat/on_change` when a server goes down (after 3 failed runs in a row) and when it comes back
+
+---
+
 ## [1.6.0] - 2026-10-30
 ### Added
 - `-q` with `-p`: print only errors, so `cron` mails you only when something is wrong. Change your cron line to `pingstat -p -q`

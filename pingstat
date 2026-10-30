@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.6.0"
+VERSION="1.7.0"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -20,6 +20,11 @@ DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pingstat"
 CONFIG_FILE="$CONFIG_DIR/servers.list"
 # Before 1.4.0: a Bash file with SERVERS="a b c", migrated by read_config
 OLD_CONFIG_FILE="$CONFIG_DIR/servers.conf"
+# Optional executable, called when a server goes down or comes back
+HOOK_FILE="$CONFIG_DIR/on_change"
+# Failed runs in a row before the hook hears of it, so a lost run is no alarm
+ALERT_AFTER=3
+HOOK_TIMEOUT=30
 
 # Ensure directories exist
 mkdir -p "$CONFIG_DIR" "$DATA_DIR"
@@ -460,6 +465,54 @@ classify_ping_failure() {
     fi
 }
 
+# The file descriptor closed here is the lock of do_ping_one: something the hook
+# leaves running must not keep the server locked
+run_hook() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$HOOK_TIMEOUT" "$HOOK_FILE" "$@" 9>&-
+    else
+        "$HOOK_FILE" "$@" 9>&-
+    fi
+}
+
+# Tell the hook about a change of state. <server>.down says that it knows about
+# the current failure; a failed hook leaves it as it was, so the next run tries
+# again.
+notify_change() {
+    local srv="$1" dbfile="$2" status="$3" loss="$4"
+    local state_file="$DATA_DIR/$srv.down"
+    local cause since count
+
+    [ -x "$HOOK_FILE" ] || return 0
+    [ "$status" != "error" ] || return 0
+
+    if [ "$status" = "ok" ] && [ "$loss" != "100" ]; then
+        [ -e "$state_file" ] || return 0
+        { read -r cause; read -r since; } < "$state_file"
+        run_hook up "$srv" "$cause" "$since" || return 1
+        rm -f "$state_file"
+        return 0
+    fi
+
+    [ ! -e "$state_file" ] || return 0
+    IFS='|' read -r count since < <(run_sql "$dbfile" <<EOF
+WITH $(failure_streak)
+SELECT COUNT(*), datetime((SELECT at FROM streak), 'localtime')
+FROM failing
+WHERE timestamp >= (SELECT at FROM streak);
+EOF
+)
+    [ "$count" -ge "$ALERT_AFTER" ] || return 0
+
+    case "$status" in
+        dns_error) cause="dns" ;;
+        net_error) cause="network" ;;
+        *) cause="no reply" ;;
+    esac
+    run_hook down "$srv" "$cause" "$since" || return 1
+    printf '%s\n%s\n' "$cause" "$since" > "$state_file"
+}
+
 do_ping_one() {
     local srv="$1"
     local dbfile
@@ -508,6 +561,11 @@ do_ping_one() {
 INSERT INTO ping_data(min, avg, max, mdev, loss, status)
 VALUES ($MIN, $AVG, $MAX, $MDEV, $LOSS, '$STATUS');
 EOF
+
+    if ! notify_change "$srv" "$dbfile" "$STATUS" "$LOSS"; then
+        echo "ERROR: The on_change hook failed for $srv. The next run tries again."
+        return 1
+    fi
 
     case "$STATUS" in
         ok)

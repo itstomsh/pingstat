@@ -2,6 +2,7 @@
 # Fake ping for the tests: the output format depends on the host name.
 host="${*: -1}"
 [ -n "${PING_STUB_SLEEP:-}" ] && sleep "$PING_STUB_SLEEP"
+[ -n "${PING_STUB_DOWN:-}" ] && host="down.$host"
 
 case "$host" in
     down.*)
