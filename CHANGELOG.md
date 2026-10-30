@@ -6,6 +6,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.7.1] - 2026-10-30
+### Added
+- `on_change` gets a fifth argument with `up`: how long the failure lasted, or `unknown` if monitoring stopped during it
+
+### Fixed
+- A failure whose `down` could not be sent, like the machine's own connection going down, was never reported. The first reply afterwards now sends `up` with the start and the duration
+
+---
+
 ## [1.7.0] - 2026-10-30
 ### Added
 - Notifications: `-p` calls the executable `~/.config/pingstat/on_change` when a server goes down (after 3 failed runs in a row) and when it comes back

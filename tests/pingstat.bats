@@ -445,7 +445,7 @@ EOF
 
     "$PINGSTAT" -p
     [ "$(wc -l < "$HOOK_LOG")" -eq 2 ]
-    [ "$(tail -n 1 "$HOOK_LOG")" = "up|ok.test|no reply|$since|" ]
+    [ "$(tail -n 1 "$HOOK_LOG")" = "up|ok.test|no reply|$since|0h 00m|" ]
     [ ! -e "$DATA/ok.test.down" ]
 
     "$PINGSTAT" -p
@@ -508,6 +508,65 @@ EOF
     PING_STUB_DOWN=1 run "$PINGSTAT" -p -q
     [ "$status" -eq 0 ]
     [ "$(wc -l < "$HOOK_LOG")" -eq 1 ]
+}
+
+@test "on_change gets up when down never got through" {
+    hook
+    new_db ok.test
+    run_at ok.test 40 0
+    run_at ok.test 30 100
+    run_at ok.test 20 100
+    touch "$BATS_TEST_TMPDIR/hook-fails"
+    PING_STUB_DOWN=1 run "$PINGSTAT" -p
+    [ "$status" -eq 1 ]
+    PING_STUB_DOWN=1 run "$PINGSTAT" -p
+    [ "$status" -eq 1 ]
+    rm "$BATS_TEST_TMPDIR/hook-fails"
+
+    run "$PINGSTAT" -p
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$HOOK_LOG")" -eq 1 ]
+    [[ "$(cat "$HOOK_LOG")" =~ ^up\|ok\.test\|no\ reply\|[0-9-]+\ [0-9:]+\|0h\ (29|30)m\|$ ]]
+    [ ! -e "$DATA/ok.test.down" ]
+}
+
+@test "on_change tries up again until it gets through" {
+    hook
+    new_db ok.test
+    run_at ok.test 60 0
+    local m
+    for m in 50 40 30; do run_at ok.test "$m" 100; done
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    touch "$BATS_TEST_TMPDIR/hook-fails"
+    run "$PINGSTAT" -p
+    [ "$status" -eq 1 ]
+    [ -e "$DATA/ok.test.down" ]
+    rm "$BATS_TEST_TMPDIR/hook-fails"
+    "$PINGSTAT" -p
+    [ "$(wc -l < "$HOOK_LOG")" -eq 2 ]
+    [ ! -e "$DATA/ok.test.down" ]
+}
+
+@test "on_change reports an unknown duration when monitoring stopped during a failure" {
+    hook
+    new_db ok.test
+    local m
+    for m in 5040 5030 5020; do run_at ok.test "$m" 0; done
+    printf '%s\n%s\n%s\n' "no reply" "2026-01-01 10:00:00" "yes" > "$DATA/ok.test.down"
+    run_at ok.test 5010 100
+    "$PINGSTAT" -p
+    [ "$(cat "$HOOK_LOG")" = "up|ok.test|no reply|2026-01-01 10:00:00|unknown|" ]
+}
+
+@test "on_change state files from 1.7.0 count as told" {
+    hook
+    new_db ok.test
+    run_at ok.test 10 100
+    printf '%s\n%s\n' "no reply" "2026-01-01 10:00:00" > "$DATA/ok.test.down"
+    PING_STUB_DOWN=1 "$PINGSTAT" -p
+    [ ! -e "$HOOK_LOG" ]
+    "$PINGSTAT" -p
+    [[ "$(cat "$HOOK_LOG")" == "up|ok.test|no reply|2026-01-01 10:00:00|"* ]]
 }
 
 @test "without on_change, -p makes no state files" {

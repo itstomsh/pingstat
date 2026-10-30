@@ -204,7 +204,7 @@ the list fails with a message instead of adding it, so a typo in a cron line can
 ## Notifications
 
 `pingstat` can tell you when a server goes down and when it comes back. Put an executable script at
-`~/.config/pingstat/on_change`. `pingstat -p` calls it with four arguments:
+`~/.config/pingstat/on_change`. `pingstat -p` calls it with these arguments:
 
 | Argument | Value |
 | --- | --- |
@@ -212,16 +212,20 @@ the list fails with a message instead of adding it, so a typo in a cron line can
 | 2 | The server |
 | 3 | `no reply`, `dns` or `network` |
 | 4 | Local time of the first failed run |
+| 5 | With `up`: how long it lasted, like `1h 25m`, or `unknown` if monitoring stopped during it |
 
 ```bash
 #!/bin/sh
-echo "$2 is $1 ($3), failing since $4" | mail -s "pingstat: $2 is $1" you@example.org
+curl -fsS -m 10 -o /dev/null -H "Title: $2 is $1" -d "$3, since $4 ${5:+($5)}" https://ntfy.sh/your-secret-topic
 ```
 
 `down` comes after 3 failed runs in a row, so a single lost run stays quiet, and only once per
 failure. `up` comes on the first reply after that. Runs that measured nothing and failures from
 before a monitoring gap do not count. The script can run for 30 seconds if `timeout` is installed. If
 it fails, `-p` reports an error and exits with status 1, and the next run tries again.
+
+If the machine's own connection is down, `down` cannot get through. The first reply afterwards then
+sends `up` with the start and the duration, so you still hear about it, later.
 
 ## Files
 
@@ -230,7 +234,7 @@ it fails, `-p` reports an error and exits with status 1, and the next run tries 
 | `~/.config/pingstat/servers.list` | Server list, one per line (`#` starts a comment); edit it by hand or with `add`/`remove` |
 | `~/.config/pingstat/on_change` | Optional script for [notifications](#notifications) |
 | `~/.local/share/pingstat/<server>.db` | Results for one server (SQLite, table `ping_data`, timestamps in UTC; `status` is `ok`, `dns_error`, `net_error` or `error`) |
-| `~/.local/share/pingstat/<server>.down` | Present while `on_change` knows the server is down |
+| `~/.local/share/pingstat/<server>.down` | Present during a failure `on_change` has to hear about |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are honoured.
 

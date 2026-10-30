@@ -11,7 +11,7 @@ fi
 ###############################################################################
 # 1) Configuration Paths & Global Variables
 ###############################################################################
-VERSION="1.7.0"
+VERSION="1.7.1"
 SCRIPT_PATH=$(realpath "$0" 2>/dev/null || command -v pingstat)
 
 # XDG-based config & data paths
@@ -475,42 +475,71 @@ run_hook() {
     fi
 }
 
-# Tell the hook about a change of state. <server>.down says that it knows about
-# the current failure; a failed hook leaves it as it was, so the next run tries
-# again.
+# How long the failure that began at the local time $2 lasted until now, or
+# unknown if the machine or cron stopped during it
+failure_duration() {
+    run_sql "$1" <<EOF
+WITH $(usual_gap),
+previous AS (
+    SELECT timestamp FROM ping_data
+    WHERE status IS NOT 'error'
+    ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET 1
+),
+total(secs) AS (
+    SELECT strftime('%s', 'now') - strftime('%s', '$2', 'utc')
+)
+SELECT CASE WHEN (julianday('now') - julianday((SELECT timestamp FROM previous))) * 86400 > (SELECT secs FROM gap)
+            THEN 'unknown'
+            ELSE (SELECT printf('%dh %02dm', secs / 3600, secs % 3600 / 60) FROM total) END;
+EOF
+}
+
+# Tell the hook about a change of state. <server>.down holds the cause and start
+# of a failure that is worth telling, and whether down got through. If the failure
+# is the machine's own connection it cannot, so the reply that ends it sends up
+# with the whole story. A failed hook is tried again on the next run.
 notify_change() {
     local srv="$1" dbfile="$2" status="$3" loss="$4"
     local state_file="$DATA_DIR/$srv.down"
-    local cause since count
+    local cause="" since="" told="" count duration
 
     [ -x "$HOOK_FILE" ] || return 0
     [ "$status" != "error" ] || return 0
 
+    if [ -e "$state_file" ]; then
+        { read -r cause; read -r since; read -r told; } < "$state_file" || true
+    fi
+
     if [ "$status" = "ok" ] && [ "$loss" != "100" ]; then
         [ -e "$state_file" ] || return 0
-        { read -r cause; read -r since; } < "$state_file"
-        run_hook up "$srv" "$cause" "$since" || return 1
+        duration=$(failure_duration "$dbfile" "$since")
+        run_hook up "$srv" "$cause" "$since" "$duration" || return 1
         rm -f "$state_file"
         return 0
     fi
 
-    [ ! -e "$state_file" ] || return 0
-    IFS='|' read -r count since < <(run_sql "$dbfile" <<EOF
+    if [ ! -e "$state_file" ]; then
+        IFS='|' read -r count since < <(run_sql "$dbfile" <<EOF
 WITH $(failure_streak)
 SELECT COUNT(*), datetime((SELECT at FROM streak), 'localtime')
 FROM failing
 WHERE timestamp >= (SELECT at FROM streak);
 EOF
 )
-    [ "$count" -ge "$ALERT_AFTER" ] || return 0
+        [ "$count" -ge "$ALERT_AFTER" ] || return 0
+        case "$status" in
+            dns_error) cause="dns" ;;
+            net_error) cause="network" ;;
+            *) cause="no reply" ;;
+        esac
+        told="no"
+        printf '%s\n%s\n%s\n' "$cause" "$since" "$told" > "$state_file"
+    fi
 
-    case "$status" in
-        dns_error) cause="dns" ;;
-        net_error) cause="network" ;;
-        *) cause="no reply" ;;
-    esac
+    # Files from 1.7.0 have no third line: down got through
+    [ "${told:-yes}" != "yes" ] || return 0
     run_hook down "$srv" "$cause" "$since" || return 1
-    printf '%s\n%s\n' "$cause" "$since" > "$state_file"
+    printf '%s\n%s\n%s\n' "$cause" "$since" "yes" > "$state_file"
 }
 
 do_ping_one() {
